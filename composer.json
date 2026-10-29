@@ -30,7 +30,7 @@
     "php": "^8.2",
     "johnpbloch/wordpress": "^6.4",
     "johnpbloch/wordpress-core-installer": "^2.0",
-    "wpackagist-plugin/advanced-custom-fields": "*",
+    "wpackagist-plugin/advanced-custom-fields": "^6.0",
     "ext-mysqli": "*",
     "wpackagist-theme/twentytwentyfive": "^1.4",
     "wpackagist-plugin/memcached": "^4.0",
