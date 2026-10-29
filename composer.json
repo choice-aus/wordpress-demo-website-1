@@ -1,6 +1,6 @@
 {
-  "name": "alwayslearning/mysite1",
-  "description": "Test Website #1",
+  "name": "choice/wordpress-demo-website-1",
+  "description": "Demo Website #1",
   "type": "project",
   "license": "proprietary",
   "prefer-stable": true,
@@ -15,9 +15,9 @@
     "sort-packages": true,
     "process-timeout": 600,
     "preferred-install": "dist",
-    "vendor-dir": "plugins/vendor",
+    "vendor-dir": "public/wp-content/plugins/vendor",
     "platform": {
-      "php": "8.1"
+      "php": "8.2"
     },
     "allow-plugins": {
       "composer/installers": true,
@@ -39,21 +39,30 @@
   "extra": {
     "wordpress-install-dir": "public/wp",
     "installer-paths": {
-      "wp-content/plugins/{$name}": [
+      "public/wp-content/plugins/{$name}": [
         "type:wordpress-plugin"
       ],
-      "wp-content/themes/{$name}": [
+      "public/wp-content/themes/{$name}": [
         "type:wordpress-theme"
       ],
-      "wp-content/mu-plugins/{$name}": [
+      "public/wp-content/mu-plugins/{$name}": [
         "type:wordpress-muplugin"
       ]
     }
   },
-  "config": {
-    "allow-plugins": {
-      "johnpbloch/wordpress-core-installer": true,
-      "composer/installers": true
-    }
+  "scripts": {
+    "post-install-cmd": [
+      "cp -f ./public/wp-content/plugins/vendor/humanmade/wordpress-pecl-memcached-object-cache/object-cache.php ./public/wp-content/object-cache.php"
+    ],
+    "lint": [
+      "phpcs --colors --runtime-set ignore_warnings_on_exit 1"
+    ],
+    "lint-fix": "phpcbf",
+    "verify": [
+      "composer validate --no-check-all --no-check-publish --strict"
+    ],
+    "test": [
+      "phpunit --configuration=./phpunit.xml"
+    ]
   }
 }

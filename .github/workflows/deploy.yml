@@ -1,0 +1,51 @@
+name: Deploy WordPress wp-content
+
+on:
+  push:
+    branches:
+      - develop
+      - staging
+      - main
+      - 'release-*'
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine target environment
+        id: target
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          case "$BRANCH" in
+            develop)
+              echo "environment=develop" >> "$GITHUB_OUTPUT"
+              ;;
+            staging)
+              echo "environment=staging" >> "$GITHUB_OUTPUT"
+              ;;
+            release-*)
+              echo "environment=release" >> "$GITHUB_OUTPUT"
+              ;;
+            main)
+              echo "environment=production" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unrecognised deployment branch: $BRANCH"
+              exit 1
+              ;;
+          esac
+
+      # Keep your existing PHP, Composer, Node,
+      # theme build and cleanup steps here.
+
+      - name: Deploy to VIP environment
+        env:
+          TARGET: ${{ steps.target.outputs.environment }}
+        run: |
+          echo "Would deploy to: $TARGET"
+          # Replace with the appropriate deployment command.

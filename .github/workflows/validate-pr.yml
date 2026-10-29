@@ -1,0 +1,48 @@
+name: Validate PR source
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'release-*'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-source:
+    name: Validate promotion path
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check source and target branches
+        env:
+          SOURCE: ${{ github.head_ref }}
+          TARGET: ${{ github.base_ref }}
+        run: |
+          case "$TARGET" in
+            main)
+              if [[ ! "$SOURCE" =~ ^release-.+ ]]; then
+                echo "Only release-* branches may merge into main."
+                exit 1
+              fi
+              ;;
+            release-*)
+              if [[ ! "$SOURCE" =~ ^feature/.+ ]]; then
+                echo "Only feature/* branches may merge into release-*."
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "Allowed PR: $SOURCE -> $TARGET"
+
+      - name: Validate PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [[ ! "$TITLE" =~ ^\[[A-Z]{3}-[0-9]+\]\ -\ .+ ]]; then
+            echo "PR title must start with [ABC-123] - "
+            exit 1
+          fi
+          echo "PR title format is valid."
