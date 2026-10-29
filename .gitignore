@@ -1,0 +1,35 @@
+# Avoid any node_modules folders anywhere in the repo
+node_modules
+
+# Avoid any vendor folders anywhere in the repo
+vendor
+
+/public/wp/
+/public/wp-content/uploads/
+
+# files in public folder
+public/.phpunit.result.cache
+public/composer.json
+public/composer.lock
+public/wp-content/object-cache.php
+
+# Other plugins that are managed by Composer
+/public/wp-content/plugins/advanced-custom-fields/
+
+# Themes
+public/wp-content/themes/twentytwenty/
+public/wp-content/themes/twentytwentyfive/
+public/wp-content/themes/**/build/
+
+# Other files/folders
+/certs/
+/.idea
+*.pem
+*.key
+.env
+debug.log
+.phpcs.cache
+
+
+# Windows metadata
+*:Zone.Identifier

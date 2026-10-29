@@ -1,0 +1,59 @@
+{
+  "name": "alwayslearning/mysite1",
+  "description": "Test Website #1",
+  "type": "project",
+  "license": "proprietary",
+  "prefer-stable": true,
+  "minimum-stability": "dev",
+  "repositories": [
+    {
+      "type": "composer",
+      "url": "https://wpackagist.org"
+    }
+  ],
+  "config": {
+    "sort-packages": true,
+    "process-timeout": 600,
+    "preferred-install": "dist",
+    "vendor-dir": "plugins/vendor",
+    "platform": {
+      "php": "8.1"
+    },
+    "allow-plugins": {
+      "composer/installers": true,
+      "cweagans/composer-patches": true,
+      "dealerdirect/phpcodesniffer-composer-installer": true,
+      "johnpbloch/wordpress-core-installer": true
+    }
+  },
+  "require": {
+    "php": "^8.2",
+    "johnpbloch/wordpress": "^6.4",
+    "johnpbloch/wordpress-core-installer": "^2.0",
+    "wpackagist-plugin/advanced-custom-fields": "*",
+    "ext-mysqli": "*",
+    "wpackagist-theme/twentytwentyfive": "^1.4",
+    "wpackagist-plugin/memcached": "^4.0",
+    "humanmade/wordpress-pecl-memcached-object-cache": "^2.1"
+  },
+  "extra": {
+    "wordpress-install-dir": "public/wp",
+    "installer-paths": {
+      "wp-content/plugins/{$name}": [
+        "type:wordpress-plugin"
+      ],
+      "wp-content/themes/{$name}": [
+        "type:wordpress-theme"
+      ],
+      "wp-content/mu-plugins/{$name}": [
+        "type:wordpress-muplugin"
+      ]
+    }
+  },
+  "config": {
+    "allow-plugins": {
+      "johnpbloch/wordpress-core-installer": true,
+      "composer/installers": true
+    }
+  }
+}
