@@ -25,4 +25,4 @@ phpMyAdmin:
 👉 http://localhost:8082
 
 Mailhog:
-👉 http://localhost:8025
+👉 http://localhost:8025Testing feature promotion
