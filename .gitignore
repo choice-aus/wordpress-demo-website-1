@@ -15,6 +15,7 @@ public/wp-content/object-cache.php
 
 # Other plugins that are managed by Composer
 /public/wp-content/plugins/advanced-custom-fields/
+/public/wp-content/plugins/memcached/
 
 # Themes
 public/wp-content/themes/twentytwenty/
