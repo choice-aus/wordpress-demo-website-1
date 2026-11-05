@@ -66,3 +66,6 @@ Mailhog:
 | `release-*` | Squash and merge |
 | `main` | Merge commit |
 
+## UAT Demonstration
+
+This change is used to demonstrate the handling of a feature that fails UAT and must be carried forward into a future staging cycle.
