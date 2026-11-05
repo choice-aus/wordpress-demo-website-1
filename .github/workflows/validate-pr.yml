@@ -4,6 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches:
+      - staging
       - main
       - 'release-*'
 
@@ -20,6 +21,32 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Checkout PR source
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Validate commit titles
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+
+          while IFS= read -r SUBJECT; do
+            if [[ ! "$SUBJECT" =~ ^\[[A-Z]{3}-[0-9]+\]\ -\ .+ ]]; then
+              echo "Invalid commit title: $SUBJECT"
+              echo "Commit titles must start with [ABC-123] - "
+              exit 1
+            fi
+            echo "Valid commit: $SUBJECT"
+          done < <(git log --no-merges --format=%s "$MERGE_BASE..$HEAD_SHA")
+
+          echo "All commit titles are valid."
+
       - name: Check source and target branches
         if: github.event_name == 'pull_request'
         env:
