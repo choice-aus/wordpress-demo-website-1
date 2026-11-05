@@ -2,6 +2,7 @@ name: Validate PR source
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
     branches:
       - main
       - 'release-*'
