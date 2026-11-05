@@ -7,6 +7,10 @@ on:
       - main
       - 'release-*'
 
+  push:
+    branches:
+      - 'release-*'
+
 permissions:
   contents: read
 
@@ -17,6 +21,7 @@ jobs:
 
     steps:
       - name: Check source and target branches
+        if: github.event_name == 'pull_request'
         env:
           SOURCE: ${{ github.head_ref }}
           TARGET: ${{ github.base_ref }}
@@ -39,6 +44,7 @@ jobs:
           echo "Allowed PR: $SOURCE -> $TARGET"
 
       - name: Validate PR title
+        if: github.event_name == 'pull_request'
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
@@ -47,3 +53,9 @@ jobs:
             exit 1
           fi
           echo "PR title format is valid."
+
+      - name: Validate release branch creation
+        if: github.event_name == 'push'
+        run: |
+          echo "Release branch push detected."
+          echo "No PR promotion validation required."
