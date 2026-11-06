@@ -1,3 +1,4 @@
+
 name: Branch cleanup audit
 
 on:
@@ -11,6 +12,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  issues: read
 
 jobs:
   audit:
@@ -19,57 +21,14 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Fetch remote branches
-        run: git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
-
-      - name: Generate branch audit
-        shell: bash
+      - name: Generate branch cleanup audit
         env:
           GH_TOKEN: ${{ github.token }}
           COMPLETED_RELEASE: ${{ inputs.completed_release }}
         run: |
-          echo "## Branch cleanup audit" >> "$GITHUB_STEP_SUMMARY"
-          if [[ -n "$COMPLETED_RELEASE" ]]; then
-            echo "Completed release supplied: \`$COMPLETED_RELEASE\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "No completed release specified. General branch audit only." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Branch | Latest commit | Merged into main? | PR history |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-
-          while IFS= read -r BRANCH; do
-            [[ -z "$BRANCH" ]] && continue
-
-            NAME="${BRANCH#origin/}"
-            COMMIT=$(git log -1 --format='%h %s' "$BRANCH")
-            PR_HISTORY=$(gh pr list \
-              --repo "$GITHUB_REPOSITORY" \
-              --state all \
-              --head "$NAME" \
-              --limit 100 \
-              --json number,baseRefName,state,mergedAt \
-              --jq '[.[] | "#\(.number) → \(.baseRefName) (\(if .mergedAt then "merged" else .state end))"] | join(", ")')
-
-            [[ -z "$PR_HISTORY" ]] && PR_HISTORY="None found"
-
-            if git merge-base --is-ancestor "$BRANCH" origin/main; then
-              MERGED="Yes"
-            else
-              MERGED="No"
-            fi
-
-            echo "| $NAME | $COMMIT | $MERGED | $PR_HISTORY |" >> "$GITHUB_STEP_SUMMARY"
-
-          done < <(
-            git branch -r --format='%(refname:short)' |
-              grep -E '^origin/(feature/|release-)' |
-              sort
-          )
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "_Read-only audit. No branches were modified._" >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/branch_audit.py \
+            --completed-release "$COMPLETED_RELEASE"
