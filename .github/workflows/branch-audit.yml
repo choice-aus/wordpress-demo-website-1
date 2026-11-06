@@ -1,0 +1,52 @@
+name: Branch cleanup audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit branches
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch remote branches
+        run: git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
+
+      - name: Generate branch audit
+        shell: bash
+        run: |
+          echo "## Branch cleanup audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | Latest commit | Merged into main? |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          while IFS= read -r BRANCH; do
+            [[ -z "$BRANCH" ]] && continue
+
+            NAME="${BRANCH#origin/}"
+            COMMIT=$(git log -1 --format='%h %s' "$BRANCH")
+
+            if git merge-base --is-ancestor "$BRANCH" origin/main; then
+              MERGED="Yes"
+            else
+              MERGED="No"
+            fi
+
+            echo "| $NAME | $COMMIT | $MERGED |" >> "$GITHUB_STEP_SUMMARY"
+
+          done < <(
+            git branch -r --format='%(refname:short)' |
+              grep -E '^origin/(feature/|release-)' |
+              sort
+          )
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Read-only audit. No branches were modified._" >> "$GITHUB_STEP_SUMMARY"
