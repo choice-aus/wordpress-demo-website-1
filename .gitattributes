@@ -1,0 +1,14 @@
+# Normalise text files to LF
+* text=auto
+
+# Explicitly enforce LF for source files
+*.php text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+
+# Windows scripts retain CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
