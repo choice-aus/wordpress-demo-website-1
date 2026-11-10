@@ -34,3 +34,7 @@ debug.log
 
 # Windows metadata
 *:Zone.Identifier
+
+# Python generated files
+__pycache__/
+*.py[cod]
