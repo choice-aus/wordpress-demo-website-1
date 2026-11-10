@@ -115,3 +115,15 @@ jobs:
           echo "- Candidate: \`$CANDIDATE\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Staging was not modified.**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Integrate carryover features
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_BRANCH: staging-next-cycle-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          python3 .github/scripts/uat_carryover.py
