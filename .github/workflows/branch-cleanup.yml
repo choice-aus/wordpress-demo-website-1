@@ -1,0 +1,45 @@
+name: Branch cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      audit_mode:
+        description: 'Which release should be cleaned up?'
+        required: true
+        default: latest
+        type: choice
+        options:
+          - latest
+          - specific
+
+      completed_release:
+        description: 'Release branch (required for specific mode)'
+        required: false
+        type: string
+
+      confirm_closed:
+        description: 'I confirm the release cycle is closed'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  approval-test:
+    name: Test cleanup approval
+    if: ${{ inputs.confirm_closed == true }}
+    runs-on: ubuntu-latest
+    environment: branch-cleanup
+
+    steps:
+      - name: Confirm approval gate
+        env:
+          AUDIT_MODE: ${{ inputs.audit_mode }}
+          COMPLETED_RELEASE: ${{ inputs.completed_release }}
+        run: |
+          echo "Cleanup environment approval granted."
+          echo "Audit mode: $AUDIT_MODE"
+          echo "Completed release: $COMPLETED_RELEASE"
+          echo "TEST ONLY: No branches were modified."
