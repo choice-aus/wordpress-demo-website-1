@@ -4,8 +4,17 @@ name: Branch cleanup audit
 on:
   workflow_dispatch:
     inputs:
+      audit_mode:
+        description: 'Which releases should be audited?'
+        required: true
+        default: latest
+        type: choice
+        options:
+          - latest
+          - specific
+
       completed_release:
-        description: 'Release branch whose cycle has been closed'
+        description: 'Release branch (required when audit_mode is specific)'
         required: false
         type: string
 
@@ -28,7 +37,9 @@ jobs:
       - name: Generate branch cleanup audit
         env:
           GH_TOKEN: ${{ github.token }}
+          AUDIT_MODE: ${{ inputs.audit_mode }}
           COMPLETED_RELEASE: ${{ inputs.completed_release }}
         run: |
           python3 .github/scripts/branch_audit.py \
+            --audit-mode "$AUDIT_MODE" \
             --completed-release "$COMPLETED_RELEASE"
