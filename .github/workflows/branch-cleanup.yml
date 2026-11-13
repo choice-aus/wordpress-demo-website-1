@@ -23,6 +23,12 @@ on:
         type: boolean
         default: false
 
+      preparation_only:
+        description: 'Prepare and verify the next UAT cycle without promoting staging or deleting branches'
+        required: true
+        type: boolean
+        default: true
+
 permissions:
   contents: read
 
@@ -92,7 +98,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Revalidate completed release
@@ -130,6 +136,14 @@ jobs:
             echo "- Approval environment: \`branch-cleanup\`"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Confirm preparation-only mode
+        if: ${{ inputs.preparation_only == true }}
+        run: |
+          echo "## Preparation-only test" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Candidate preparation and verification are enabled." >> "$GITHUB_STEP_SUMMARY"
+          echo "Staging promotion and branch deletion are disabled." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Validate staging reset safety
         id: reset_plan
