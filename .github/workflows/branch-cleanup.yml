@@ -57,21 +57,11 @@ jobs:
               echo "A release branch is required in specific mode."
               exit 1
             fi
+
             echo "name=$COMPLETED_RELEASE" >> "$GITHUB_OUTPUT"
           else
-            RELEASE=$(python3 - <<'PY'
-            import subprocess
-            from branch_audit import get_latest_release
-
-            repository = subprocess.check_output(
-              ["gh", "repo", "view", "--json", "nameWithOwner",
-               "--jq", ".nameWithOwner"],
-              text=True,
-            ).strip()
-
-            print(get_latest_release(repository))
-            PY
-            )
+            REPOSITORY=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+            RELEASE=$(python3 -c 'import sys; from branch_audit import get_latest_release; print(get_latest_release(sys.argv[1]))' "$REPOSITORY")
 
             echo "name=$RELEASE" >> "$GITHUB_OUTPUT"
           fi
