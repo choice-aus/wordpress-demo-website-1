@@ -260,6 +260,27 @@ jobs:
             echo "**Staging has not been modified.**"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Preserve verification scripts
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/next-cycle-scripts"
+
+          cp .github/scripts/verify_next_cycle.py \
+            "$RUNNER_TEMP/next-cycle-scripts/"
+
+          cp .github/scripts/staging_reset_check.py \
+            "$RUNNER_TEMP/next-cycle-scripts/"
+
+          cp .github/scripts/staging_reset_plan.py \
+            "$RUNNER_TEMP/next-cycle-scripts/"
+
+          cp .github/scripts/uat_carryover.py \
+            "$RUNNER_TEMP/next-cycle-scripts/"
+
+          cp .github/scripts/branch_audit.py \
+            "$RUNNER_TEMP/next-cycle-scripts/"
+
       - name: Integrate UAT carryover
         env:
           GH_TOKEN: ${{ github.token }}
@@ -283,8 +304,8 @@ jobs:
         run: |
           set -uo pipefail
 
-          PYTHONPATH=.github/scripts \
-            python3 .github/scripts/verify_next_cycle.py \
+          PYTHONPATH="$RUNNER_TEMP/next-cycle-scripts" \
+            python3 "$RUNNER_TEMP/next-cycle-scripts/verify_next_cycle.py" \
             | tee next-cycle-verification.md
 
           RESULT=${PIPESTATUS[0]}
