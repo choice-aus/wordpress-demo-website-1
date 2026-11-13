@@ -10,8 +10,12 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-
-PROTECTED_LABELS = {"uat-failed-retest", "deferred", "rejected"}
+PROTECTED_LABELS = {
+    "uat-failed-retest",
+    "deferred",
+    "rejected",
+    "carryover-next-cycle",
+}
 TICKET_PATTERN = re.compile(r"\b[A-Z]{3}-\d+\b")
 
 
@@ -61,6 +65,155 @@ def get_prs(repository):
 
     return prs
 
+def get_prs_for_base(repository, base):
+    """Retrieve PRs targeting a specific branch."""
+    prs = []
+    page = 1
+
+    while True:
+        batch = github(
+            "api", f"repos/{repository}/pulls",
+            "--method", "GET",
+            "-f", "state=all",
+            "-f", f"base={base}",
+            "-f", "per_page=100",
+            "-f", f"page={page}",
+        )
+
+        prs.extend(batch)
+
+        if len(batch) < 100:
+            break
+
+        page += 1
+
+    return prs
+
+def get_open_prs_for_branch(repository, branch):
+    """Retrieve open PRs originating from a specific branch."""
+    prs = []
+    page = 1
+
+    owner = repository.split("/")[0]
+
+    while True:
+        batch = github(
+            "api", f"repos/{repository}/pulls",
+            "--method", "GET",
+            "-f", "state=open",
+            "-f", f"head={owner}:{branch}",
+            "-f", "per_page=100",
+            "-f", f"page={page}",
+        )
+
+        prs.extend(batch)
+
+        if len(batch) < 100:
+            break
+
+        page += 1
+
+    return prs
+
+def get_open_prs(repository):
+    """Retrieve all open PRs with pagination."""
+    prs = []
+    page = 1
+
+    while True:
+        batch = github(
+            "api", f"repos/{repository}/pulls",
+            "--method", "GET",
+            "-f", "state=open",
+            "-f", "per_page=100",
+            "-f", f"page={page}",
+        )
+
+        prs.extend(batch)
+
+        if len(batch) < 100:
+            break
+
+        page += 1
+
+    return prs
+
+def get_prs_for_branch(repository, branch):
+    """Retrieve PR history for one branch, across all target branches."""
+    prs = []
+    page = 1
+    owner = repository.split("/")[0]
+
+    while True:
+        batch = github(
+            "api",
+            f"repos/{repository}/pulls",
+            "--method", "GET",
+            "-f", "state=all",
+            "-f", f"head={owner}:{branch}",
+            "-f", "per_page=100",
+            "-f", f"page={page}",
+        )
+
+        prs.extend(batch)
+
+        if len(batch) < 100:
+            break
+
+        page += 1
+
+    return prs
+
+def get_latest_release(repository):
+    """Find the most recently merged release PR into main."""
+    page = 1
+    latest = None
+
+    while True:
+        batch = github(
+            "api", f"repos/{repository}/pulls",
+            "--method", "GET",
+            "-f", "state=closed",
+            "-f", "base=main",
+            "-f", "sort=updated",
+            "-f", "direction=desc",
+            "-f", "per_page=100",
+            "-f", f"page={page}",
+        )
+
+        for pr in batch:
+            if not pr["merged_at"]:
+                continue
+
+            if not pr["head"]["ref"].startswith("release-"):
+                continue
+
+            if not pr["head"]["repo"]:
+                continue
+
+            if (
+                pr["head"]["repo"]["full_name"]
+                != pr["base"]["repo"]["full_name"]
+            ):
+                continue
+
+            if (
+                latest is None
+                or pr["merged_at"] > latest["merged_at"]
+            ):
+                latest = pr
+
+        if len(batch) < 100:
+            break
+
+        page += 1
+
+    if latest is None:
+        raise RuntimeError(
+            "No merged release-* PR into main was found"
+        )
+
+    return latest["head"]["ref"]
 
 def get_labels(repository, number):
     return {
@@ -96,6 +249,22 @@ def classify(branch, prs, completed_release, release_verified):
 
     if any(pr["state"] == "open" for pr in branch_prs):
         return "Keep", "Open PR exists"
+
+    labels = {
+        label["name"].lower()
+        for pr in branch_prs
+        for label in pr.get("labels", [])
+    }
+
+    protected_labels = labels & PROTECTED_LABELS
+
+    if protected_labels:
+        return (
+            "Keep",
+            "Protected PR label: " + ", ".join(
+                sorted(protected_labels)
+            ),
+        )
 
     if branch.startswith("release-"):
         if branch != completed_release:
@@ -144,12 +313,116 @@ def classify(branch, prs, completed_release, release_verified):
         "No release PR matches current tip with deployed squash commit"
     )
 
+def get_cleanup_candidates(repository, completed_release):
+    """
+    Return the cleanup assessment for branches associated with a release.
 
+    Each result contains:
+      - branch
+      - sha
+      - status
+      - reason
+      - commit
+    """
+    existing_branches = set(get_branches())
+
+    feature_prs = get_prs_for_base(repository, completed_release)
+
+    release_prs = github(
+        "api",
+        f"repos/{repository}/pulls",
+        "--method", "GET",
+        "-f", "state=closed",
+        "-f", "base=main",
+        "-f", f"head={repository.split('/')[0]}:{completed_release}",
+        "-f", "per_page=100",
+    )
+
+    release_verified = (
+        completed_release in existing_branches
+        and any(
+            pr["merged_at"]
+            and pr["head"]["ref"] == completed_release
+            and pr["head"]["repo"]
+            and pr["head"]["repo"]["full_name"] == repository
+            for pr in release_prs
+        )
+        and is_ancestor(
+            f"origin/{completed_release}",
+            "origin/main",
+        )
+    )
+
+    branches = sorted({
+        completed_release,
+        *(
+            pr["head"]["ref"]
+            for pr in feature_prs
+            if pr["merged_at"]
+            and pr["head"]["repo"]
+            and pr["head"]["repo"]["full_name"] == repository
+        ),
+    })
+
+    prs = feature_prs + release_prs + get_open_prs(repository)
+
+    for branch in branches:
+        prs.extend(get_prs_for_branch(repository, branch))
+
+    results = []
+
+    for branch in branches:
+        if branch not in existing_branches:
+            results.append({
+                "branch": branch,
+                "sha": None,
+                "status": "Keep",
+                "reason": "Branch already deleted or unavailable",
+                "commit": "N/A",
+            })
+            continue
+
+        status, reason = classify(
+            branch, prs, completed_release, release_verified
+        )
+
+        results.append({
+            "branch": branch,
+            "sha": git("rev-parse", f"origin/{branch}"),
+            "status": status,
+            "reason": reason,
+            "commit": git(
+                "log", "-1", "--format=%h %s", f"origin/{branch}"
+            ),
+        })
+
+    return release_verified, results
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--completed-release", default="")
+
+    parser.add_argument(
+        "--audit-mode",
+        choices=["latest", "specific"],
+        default="latest",
+    )
+
+    parser.add_argument(
+        "--completed-release",
+        default="",
+    )
+
     args = parser.parse_args()
+
+    if args.audit_mode == "specific" and not args.completed_release:
+        parser.error(
+            "--completed-release is required when --audit-mode=specific"
+        )
+
+    if args.audit_mode != "specific" and args.completed_release:
+        parser.error(
+            "--completed-release is only valid when --audit-mode=specific"
+        )
 
     repository = run(
         "gh", "repo", "view",
@@ -157,42 +430,27 @@ def main():
         "--jq", ".nameWithOwner"
     )
 
-    branches = get_branches()
-    prs = get_prs(repository)
-
-    release_prs = [
-        pr for pr in prs
-        if pr["head"]["ref"] == args.completed_release
-        and pr["base"]["ref"] == "main"
-        and pr["merged_at"]
-    ]
-
-    release_verified = bool(args.completed_release and release_prs)
-
-    rows = []
-    for branch in branches:
-        branch_prs = [
-            pr for pr in prs if pr["head"]["ref"] == branch
-        ]
-
-        labels = set()
-        for pr in branch_prs:
-            labels.update(get_labels(repository, pr["number"]))
-
-        status, reason = classify(
-            branch, prs, args.completed_release, release_verified
+    if args.audit_mode == "latest":
+        args.completed_release = get_latest_release(repository)
+        print(
+            f"Latest merged release identified: "
+            f"{args.completed_release}"
         )
 
-        if labels & PROTECTED_LABELS:
-            status = "Keep"
-            reason = "Protected PR label: " + ", ".join(
-                sorted(labels & PROTECTED_LABELS)
-            )
+    release_verified, assessments = get_cleanup_candidates(
+        repository,
+        args.completed_release,
+    )
 
-        commit = git("log", "-1", "--format=%h %s", f"origin/{branch}")
-
-        rows.append((branch, status, reason, commit))
-
+    rows = [
+        (
+            item["branch"],
+            item["status"],
+            item["reason"],
+            item["commit"],
+        )
+        for item in assessments
+    ]
 
     counts = {
         "Cleanup candidate": 0,

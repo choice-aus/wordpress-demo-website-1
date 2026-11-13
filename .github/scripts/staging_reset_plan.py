@@ -165,6 +165,35 @@ def open_staging_pr_count():
 
     return len(prs)
 
+def staging_feature_commits(repository, merged_prs):
+    """Map original feature commits to merged staging PRs."""
+
+    from staging_reset_check import github_paginated
+
+    staging_prs = [
+        pr for pr in merged_prs
+        if pr.get("base", {}).get("ref") == "staging"
+        and pr.get("head", {}).get("ref", "").startswith("feature/")
+    ]
+
+    commits_to_prs = {}
+
+    for pr in staging_prs:
+        commits = github_paginated(
+            f"repos/{repository}/pulls/{pr['number']}/commits"
+        )
+
+        for commit in commits:
+            commits_to_prs.setdefault(
+                commit["sha"], []
+            ).append({
+                "pr": pr["number"],
+                "branch": pr["head"]["ref"],
+                "merge_sha": pr.get("merge_commit_sha"),
+            })
+
+    return commits_to_prs
+
 def released_feature_commits(repository, merged_prs):
     """Map original feature commits to verified release promotions."""
 
@@ -243,6 +272,58 @@ def verify_release_patch(original_commit, release_commit, main_ref="origin/main"
 
     return ancestry.returncode == 0
 
+def classify_staging_commits(staging_ref, main_ref="origin/main"):
+    """Classify individual staging-only commits by release evidence."""
+
+    repository = run(
+        "gh", "repo", "view",
+        "--json", "nameWithOwner",
+        "--jq", ".nameWithOwner",
+    )
+
+    merged_prs = merged_pull_requests(repository)
+    released = released_feature_commits(repository, merged_prs)
+    prs_by_number = {
+        pr["number"]: pr for pr in merged_prs
+    }
+
+    commits = git(
+        "rev-list",
+        "--no-merges",
+        staging_ref,
+        f"^{main_ref}",
+    ).splitlines()
+
+    classifications = {}
+
+    for commit in commits:
+        chains = released.get(commit, [])
+
+        if not chains:
+            classifications[commit] = "no_release_evidence"
+            continue
+
+        verified = False
+
+        for chain in chains:
+            feature_pr = prs_by_number.get(chain["feature_pr"])
+
+            if not feature_pr:
+                continue
+
+            release_commit = feature_pr.get("merge_commit_sha")
+
+            if release_commit and verify_release_patch(
+                commit, release_commit, main_ref
+            ):
+                verified = True
+                break
+
+        classifications[commit] = (
+            "verified" if verified else "history_only"
+        )
+
+    return classifications
 
 def release_verification_summary(staging_ref, main_ref="origin/main"):
     """Summarise release verification for staging-only commits."""
