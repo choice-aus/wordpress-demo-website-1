@@ -5,125 +5,14 @@ on:
 
 permissions:
   contents: write
+  actions: read
   pull-requests: read
-
-concurrency:
-  group: prepare-next-uat-cycle
-  cancel-in-progress: false
+  issues: read
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out main
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Run staging reset safety plan
-        id: plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          python3 .github/scripts/staging_reset_plan.py \
-            | tee staging-reset-plan.md
-
-          cat staging-reset-plan.md >> "$GITHUB_STEP_SUMMARY"
-
-          if ! grep -q \
-            'Decision: Ready for approval' \
-            staging-reset-plan.md; then
-            echo "Safety plan did not approve preparation."
-            exit 1
-          fi
-          
-          MAIN_SHA=$(sed -n 's/^- Current main: `\([0-9a-f]*\)`$/\1/p' staging-reset-plan.md)
-          STAGING_SHA=$(sed -n 's/^- Current staging: `\([0-9a-f]*\)`$/\1/p' staging-reset-plan.md)
-
-          if [[ ! "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ||
-            ! "$STAGING_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Could not read validated commit SHAs from reset plan."
-            exit 1
-          fi
-
-          echo "main_sha=$MAIN_SHA" >> "$GITHUB_OUTPUT"
-          echo "staging_sha=$STAGING_SHA" >> "$GITHUB_OUTPUT"          
-
-      - name: Prepare backup and candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          MAIN_SHA=$(gh api \
-            "repos/${{ github.repository }}/git/ref/heads/main" \
-            --jq '.object.sha')
-
-          STAGING_SHA=$(gh api \
-            "repos/${{ github.repository }}/git/ref/heads/staging" \
-            --jq '.object.sha')
-
-          EXPECTED_MAIN="${{ steps.plan.outputs.main_sha }}"
-          EXPECTED_STAGING="${{ steps.plan.outputs.staging_sha }}"
-
-          if [[ "$MAIN_SHA" != "$EXPECTED_MAIN" ||
-                "$STAGING_SHA" != "$EXPECTED_STAGING" ]]; then
-            echo "Main or staging changed after safety validation."
-            echo "Preparation aborted. Run the workflow again."
-            exit 1
-          fi
-
-          BACKUP="backup/staging-before-reset-${STAGING_SHA:0:12}"
-          CANDIDATE="staging-next-cycle-${{ github.run_id }}"
-
-          create_or_verify_branch() {
-            local branch="$1"
-            local sha="$2"
-            local existing
-
-            existing=$(gh api \
-              "repos/${{ github.repository }}/git/ref/heads/$branch" \
-              --jq '.object.sha' 2>/dev/null) || existing=""
-
-            if [[ -n "$existing" ]]; then
-              if [[ "$existing" != "$sha" ]]; then
-                echo "Branch $branch exists at unexpected SHA."
-                exit 1
-              fi
-              echo "Verified existing branch: $branch"
-            else
-              gh api \
-                "repos/${{ github.repository }}/git/refs" \
-                --method POST \
-                -f ref="refs/heads/$branch" \
-                -f sha="$sha"
-            fi
-          }
-
-          create_or_verify_branch "$BACKUP" "$STAGING_SHA"
-          create_or_verify_branch "$CANDIDATE" "$MAIN_SHA"
-
-          echo "## Prepared UAT cycle" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Main SHA: \`$MAIN_SHA\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Staging SHA: \`$STAGING_SHA\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Backup: \`$BACKUP\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Candidate: \`$CANDIDATE\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Staging was not modified.**" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Integrate carryover features
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANDIDATE_BRANCH: staging-next-cycle-${{ github.run_id }}
-        run: |
-          set -euo pipefail
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          python3 .github/scripts/uat_carryover.py
+    uses: ./.github/workflows/branch-cleanup.yml
+    with:
+      audit_mode: latest
+      confirm_closed: true
+      preparation_only: true

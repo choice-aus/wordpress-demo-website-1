@@ -54,6 +54,10 @@ def merged_pull_requests(repository):
     return [
         pr for pr in prs
         if pr.get("merged_at")
+        and pr.get("head", {}).get("repo")
+        and pr.get("base", {}).get("repo")
+        and pr["head"]["repo"]["full_name"] == repository
+        and pr["base"]["repo"]["full_name"] == repository
     ]
 
 def feature_release_prs(feature_branch, merged_prs):
@@ -61,7 +65,7 @@ def feature_release_prs(feature_branch, merged_prs):
     return [
         pr for pr in merged_prs
         if pr.get("head", {}).get("ref") == feature_branch
-        and pr.get("base", {}).get("ref", "").startswith("release")
+        and pr.get("base", {}).get("ref", "").startswith("release-")
     ]
 
 

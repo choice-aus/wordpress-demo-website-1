@@ -5,6 +5,8 @@
 import os
 import subprocess
 
+from release_evidence import verify_promoted_pr
+
 from staging_reset_check import (
     git,
     github_paginated,
@@ -214,63 +216,23 @@ def released_feature_commits(repository, merged_prs):
     for branch in sorted(feature_branches):
         for feature_pr in feature_release_prs(branch, merged_prs):
             chain = verify_release_chain(feature_pr, merged_prs)
-
-            if not chain:
+            if not chain or not verify_promoted_pr(feature_pr):
                 continue
-
             commits = github_paginated(
                 f"repos/{repository}/pulls/{feature_pr['number']}/commits"
             )
-
+            # GitHub's PR commit list must describe exactly the reviewed range.
+            head = feature_pr["head"]["sha"]
+            squash = feature_pr["merge_commit_sha"]
+            base = git("merge-base", f"{squash}^", head)
+            expected = set(git("rev-list", head, f"^{base}").splitlines())
+            if {item["sha"] for item in commits} != expected:
+                continue
             for commit in commits:
                 released.setdefault(commit["sha"], []).append(chain)
 
     return released
 
-
-def commit_patch_id(commit):
-    """Calculate the stable patch ID of a Git commit."""
-
-    patch = subprocess.run(
-        ["git", "show", "--format=", "--no-ext-diff", commit],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-
-    if not patch.strip():
-        return None
-
-    result = subprocess.run(
-        ["git", "patch-id", "--stable"],
-        input=patch,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    return result.split()[0] if result else None
-
-
-def verify_release_patch(original_commit, release_commit, main_ref="origin/main"):
-    """Verify equivalent patches and release ancestry."""
-
-    original_patch = commit_patch_id(original_commit)
-    release_patch = commit_patch_id(release_commit)
-
-    if not original_patch or not release_patch:
-        return False
-
-    if original_patch != release_patch:
-        return False
-
-    ancestry = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", release_commit, main_ref],
-        check=False,
-        capture_output=True,
-    )
-
-    return ancestry.returncode == 0
 
 def classify_staging_commits(staging_ref, main_ref="origin/main"):
     """Classify individual staging-only commits by release evidence."""
@@ -283,110 +245,29 @@ def classify_staging_commits(staging_ref, main_ref="origin/main"):
 
     merged_prs = merged_pull_requests(repository)
     released = released_feature_commits(repository, merged_prs)
-    prs_by_number = {
-        pr["number"]: pr for pr in merged_prs
+    commits = git(
+        "rev-list", "--no-merges", staging_ref, f"^{main_ref}"
+    ).splitlines()
+    from staging_reset_check import is_ancestor
+    return {
+        commit: (
+            "verified" if any(
+                is_ancestor(chain["feature_merge_sha"], main_ref)
+                and is_ancestor(chain["release_merge_sha"], main_ref)
+                for chain in released.get(commit, [])
+            ) else "no_release_evidence"
+        )
+        for commit in commits
     }
 
-    commits = git(
-        "rev-list",
-        "--no-merges",
-        staging_ref,
-        f"^{main_ref}",
-    ).splitlines()
-
-    classifications = {}
-
-    for commit in commits:
-        chains = released.get(commit, [])
-
-        if not chains:
-            classifications[commit] = "no_release_evidence"
-            continue
-
-        verified = False
-
-        for chain in chains:
-            feature_pr = prs_by_number.get(chain["feature_pr"])
-
-            if not feature_pr:
-                continue
-
-            release_commit = feature_pr.get("merge_commit_sha")
-
-            if release_commit and verify_release_patch(
-                commit, release_commit, main_ref
-            ):
-                verified = True
-                break
-
-        classifications[commit] = (
-            "verified" if verified else "history_only"
-        )
-
-    return classifications
 
 def release_verification_summary(staging_ref, main_ref="origin/main"):
-    """Summarise release verification for staging-only commits."""
-
-    repository = run(
-        "gh", "repo", "view",
-        "--json", "nameWithOwner",
-        "--jq", ".nameWithOwner",
-    )
-
-    merged_prs = merged_pull_requests(repository)
-    released = released_feature_commits(repository, merged_prs)
-
-    commits = git(
-        "rev-list",
-        "--no-merges",
-        staging_ref,
-        f"^{main_ref}",
-    ).splitlines()
-
-    counts = {
-        "verified": 0,
-        "history_only": 0,
-        "no_release_evidence": 0,
+    classifications = classify_staging_commits(staging_ref, main_ref)
+    return {
+        status: list(classifications.values()).count(status)
+        for status in ("verified", "history_only", "no_release_evidence")
     }
 
-    for commit in commits:
-        chains = released.get(commit, [])
-
-        if not chains:
-            counts["no_release_evidence"] += 1
-            continue
-
-        verified = False
-
-        for chain in chains:
-            feature_pr = next(
-                (
-                    pr for pr in merged_prs
-                    if pr["number"] == chain["feature_pr"]
-                ),
-                None,
-            )
-
-            if not feature_pr:
-                continue
-
-            release_commit = feature_pr.get("merge_commit_sha")
-
-            if release_commit and verify_release_patch(
-                commit,
-                release_commit,
-                main_ref,
-            ):
-                verified = True
-                break
-
-        if verified:
-            counts["verified"] += 1
-        else:
-            counts["history_only"] += 1
-
-    return counts
 
 def main():
     git("fetch", "origin", "main", "staging")

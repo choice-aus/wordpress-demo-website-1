@@ -6,15 +6,18 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 
-REPO = os.environ["GITHUB_REPOSITORY"]
+REPO = os.environ.get("GITHUB_REPOSITORY", "")
+WORKTREE = None
 LABEL = "carryover-next-cycle"
 
 
 def run(*args, check=True):
     return subprocess.run(
-        args, text=True, capture_output=True, check=check
+        args, text=True, capture_output=True, check=check,
+        cwd=WORKTREE if args[0] == "git" else None
     )
 
 
@@ -59,6 +62,12 @@ def selected_carryover_prs():
         if not pr["merged_at"] or pr["base"]["ref"] != "staging":
             continue
 
+        if (
+            not pr["head"].get("repo")
+            or pr["head"]["repo"]["full_name"] != REPO
+            or not pr["head"]["ref"].startswith("feature/")
+        ):
+            continue
         branch = pr["head"]["ref"]
 
         commits = gh_api_paginated(
@@ -72,22 +81,29 @@ def selected_carryover_prs():
 
         tested_sha = commits[-1]["sha"]
 
-        if branch not in selected or pr["number"] > selected[branch]["number"]:
+        if branch not in selected or (pr["merged_at"], pr["number"]) > (
+            selected[branch]["merged_at"], selected[branch]["number"]
+        ):
             selected[branch] = {
                 "number": pr["number"],
+                "merged_at": pr["merged_at"],
                 "branch": branch,
                 "tested_sha": tested_sha,
             }
 
     return selected
 
-def main():
+def prepare():
     candidate = os.environ["CANDIDATE_BRANCH"]
 
     selected = selected_carryover_prs()
 
     run("git", "fetch", "origin", candidate)
-    run("git", "switch", "-C", candidate, "FETCH_HEAD")
+    initial_sha = run("git", "rev-parse", f"origin/{candidate}").stdout.strip()
+    global WORKTREE
+    directory = tempfile.mkdtemp(prefix="uat-carryover-")
+    run("git", "worktree", "add", "--detach", directory, initial_sha)
+    WORKTREE = directory
 
     succeeded = []
     failed = []
@@ -145,7 +161,8 @@ def main():
                     f"{merge.stdout}\n{merge.stderr}",
                     file=sys.stderr,
                 )
-                return 1
+                failed.append((number, branch, "Unexpected merge failure: " + merge.stderr.strip()))
+                continue
 
             failed.append(
                 (number, branch, f"Merge conflict: {conflicts}")
@@ -154,13 +171,10 @@ def main():
 
         succeeded.append((number, branch, tested_sha))
 
-    # Publish only after all merge attempts have completed.
-    if succeeded:
-        run("git", "push", "origin", f"HEAD:refs/heads/{candidate}")
-
     # Record the exact revisions successfully carried over.
     manifest = {
         "candidate": candidate,
+        "candidate_sha": run("git", "rev-parse", "HEAD").stdout.strip(),
         "carryovers": [
             {
                 "pr": number,
@@ -181,6 +195,11 @@ def main():
 
     with open("carryover-manifest.json", "w") as output:
         json.dump(manifest, output, indent=2)
+
+    # Publish only after all merge attempts have completed.
+    if succeeded:
+        run("git", "push", f"--force-with-lease=refs/heads/{candidate}:{initial_sha}",
+            "origin", f"HEAD:refs/heads/{candidate}")
 
     summary = [
         "## Automated UAT carryover",
@@ -221,6 +240,16 @@ def main():
         print("All selected carryovers completed successfully.")
 
     return 0
+
+def main():
+    global WORKTREE
+    try:
+        return prepare()
+    finally:
+        if WORKTREE:
+            directory, WORKTREE = WORKTREE, None
+            run("git", "worktree", "remove", "--force", directory)
+
 
 if __name__ == "__main__":
     sys.exit(main())

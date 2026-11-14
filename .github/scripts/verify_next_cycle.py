@@ -35,6 +35,10 @@ def main():
         print("BLOCKED: Carryover manifest references a different candidate.")
         return 1
 
+    if manifest.get("candidate_sha") != candidate_sha:
+        print("BLOCKED: Candidate SHA differs from the carryover manifest.")
+        return 1
+
     selected = selected_carryover_prs()
 
     expected = {
@@ -103,7 +107,7 @@ def main():
         print(
             f"MANUAL FOLLOW-UP: PR #{item['pr']} "
             f"({item['branch']}) could not be carried over. "
-            f"Original staging is preserved at {backup}."
+            f"Reason: {item['reason']}. Original staging is preserved at {backup}."
         )
 
     print(
@@ -128,6 +132,12 @@ def main():
 
     if not is_ancestor(main_sha, candidate_sha):
         print("BLOCKED: Candidate does not contain expected main.")
+        return 1
+
+    from staging_reset_check import check_merge_commits
+    _, review_merges = check_merge_commits(staging_sha)
+    if review_merges:
+        print(f"BLOCKED: Staging merge content requires review: {review_merges}")
         return 1
 
     staging_only = git(
@@ -196,7 +206,7 @@ def main():
     print(f"- Associated with failed carryovers: {len(accounted_failures)}")
     print(f"- Unaccounted staging commits: {len(unaccounted)}")
 
-    if unresolved:
+    if unresolved or failed:
         print()
         print("### Unresolved staging commits")
         for commit in unresolved:
