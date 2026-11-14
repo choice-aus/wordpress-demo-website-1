@@ -4,317 +4,124 @@ on:
   workflow_dispatch:
     inputs:
       audit_mode:
-        description: 'Which release should be cleaned up?'
+        description: Which completed release should be cleaned up?
         required: true
         default: latest
         type: choice
-        options:
-          - latest
-          - specific
-
+        options: [latest, specific]
       completed_release:
-        description: 'Release branch (required for specific mode)'
-        required: false
+        description: Release branch (required for specific mode)
         type: string
-
       confirm_closed:
-        description: 'I confirm the release cycle is closed'
-        required: true
+        description: I confirm the release cycle is closed
         type: boolean
         default: false
-
       preparation_only:
-        description: 'Prepare and verify the next UAT cycle without promoting staging or deleting branches'
-        required: true
+        description: Prepare and verify only; never reset staging or delete branches
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      audit_mode:
+        type: string
+        default: latest
+      completed_release:
+        type: string
+        default: ''
+      confirm_closed:
+        type: boolean
+        default: false
+      preparation_only:
         type: boolean
         default: true
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
+  issues: read
 
+# Shared by the legacy preparation entry point through workflow_call.
 concurrency:
   group: close-release-cycle
   cancel-in-progress: false
 
 jobs:
   assessment:
-    name: Assess cleanup candidates
+    name: Assess release and record approved SHAs
     runs-on: ubuntu-latest
-
-    outputs:
-      completed_release: ${{ steps.release.outputs.name }}
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
-
-      - name: Resolve completed release
-        id: release
+          persist-credentials: false
+      - name: Test release safety controls
+        run: python3 -m unittest discover -s tests -v
+      - name: Assess release cycle
         env:
+          GH_TOKEN: ${{ github.token }}
           AUDIT_MODE: ${{ inputs.audit_mode }}
           COMPLETED_RELEASE: ${{ inputs.completed_release }}
-          PYTHONPATH: .github/scripts
-          GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$AUDIT_MODE" == "specific" ]]; then
-            if [[ -z "$COMPLETED_RELEASE" ]]; then
-              echo "A release branch is required in specific mode."
-              exit 1
-            fi
-
-            echo "name=$COMPLETED_RELEASE" >> "$GITHUB_OUTPUT"
-          else
-            REPOSITORY=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-            RELEASE=$(python3 -c 'import sys; from branch_audit import get_latest_release; print(get_latest_release(sys.argv[1]))' "$REPOSITORY")
-
-            echo "name=$RELEASE" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Generate cleanup assessment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMPLETED_RELEASE: ${{ steps.release.outputs.name }}
-        run: |
-          python3 .github/scripts/branch_audit.py \
-            --audit-mode specific \
-            --completed-release "$COMPLETED_RELEASE" \
-            | tee "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          python3 .github/scripts/release_cycle.py assess \
+            --audit-mode "$AUDIT_MODE" \
+            --completed-release "$COMPLETED_RELEASE" | tee release-cycle-assessment.txt
+          {
+            echo '## Release cycle assessment'
+            echo 'Review the release, preparation eligibility and branch SHAs before approval.'
+            echo '```json'
+            cat release-cycle-plan.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-cycle-plan-${{ github.run_attempt }}
+          path: release-cycle-plan.json
+          if-no-files-found: error
 
   execute:
-    name: Close release cycle
+    name: Approved release-cycle operations
     needs: assessment
     if: ${{ inputs.confirm_closed == true }}
     runs-on: ubuntu-latest
     environment: branch-cleanup
-
     permissions:
       contents: write
+      actions: read
       pull-requests: read
       issues: read
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-
-      - name: Revalidate completed release
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-cycle-plan-${{ github.run_attempt }}
+      - name: Revalidate, prepare and close approved release
         env:
           GH_TOKEN: ${{ github.token }}
-          COMPLETED_RELEASE: ${{ needs.assessment.outputs.completed_release }}
+          PREPARATION_ONLY: ${{ inputs.preparation_only }}
         run: |
           set -euo pipefail
-
-          if [[ -z "$COMPLETED_RELEASE" ]]; then
-            echo "No completed release was supplied."
-            exit 1
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 -u .github/scripts/release_cycle.py execute \
+            --preparation-only "$PREPARATION_ONLY" 2>&1 | tee release-cycle-result.txt
+      - name: Preserve verification evidence, including failed carryovers
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-cycle-evidence-${{ github.run_attempt }}
+          path: |
+            release-cycle-plan.json
+            carryover-manifest.json
+            release-cycle-result.txt
+      - name: Report outcome
+        if: ${{ always() }}
+        run: |
+          if [[ -f release-cycle-result.txt ]]; then
+            cat release-cycle-result.txt >> "$GITHUB_STEP_SUMMARY"
           fi
-
-          echo "Revalidating release: $COMPLETED_RELEASE"
-
-          python3 .github/scripts/branch_audit.py \
-            --audit-mode specific \
-            --completed-release "$COMPLETED_RELEASE"
-
-      - name: Confirm approved release closure
-        env:
-          COMPLETED_RELEASE: ${{ needs.assessment.outputs.completed_release }}
-        run: |
-          set -euo pipefail
-
-          echo "Release closure approved."
-          echo "Completed release: $COMPLETED_RELEASE"
-          echo "Starting approved release-cycle operations."
-
-          {
-            echo "## Approved release closure"
-            echo ""
-            echo "- Completed release: \`$COMPLETED_RELEASE\`"
-            echo "- Approval environment: \`branch-cleanup\`"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Confirm preparation-only mode
-        if: ${{ inputs.preparation_only == true }}
-        run: |
-          echo "## Preparation-only test" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Candidate preparation and verification are enabled." >> "$GITHUB_STEP_SUMMARY"
-          echo "Staging promotion and branch deletion are disabled." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Validate staging reset safety
-        id: reset_plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          python3 .github/scripts/staging_reset_plan.py \
-            | tee staging-reset-plan.md
-
-          cat staging-reset-plan.md >> "$GITHUB_STEP_SUMMARY"
-
-          if grep -q 'Decision: Blocked' staging-reset-plan.md; then
-            echo "Staging reset safety checks failed."
-            exit 1
-          fi
-
-          if ! grep -Eq \
-            'Decision: (Ready for approval|Approval required)' \
-            staging-reset-plan.md; then
-            echo "Unexpected staging reset decision."
-            exit 1
-          fi
-
-          echo "Initial safety assessment accepted."
-          echo "Carryover and candidate verification are still required."
-
-          MAIN_SHA=$(sed -n \
-            's/^- Current main: `\([0-9a-f]*\)`$/\1/p' \
-            staging-reset-plan.md)
-
-          STAGING_SHA=$(sed -n \
-            's/^- Current staging: `\([0-9a-f]*\)`$/\1/p' \
-            staging-reset-plan.md)
-
-          if [[ ! "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ||
-                ! "$STAGING_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Could not extract validated branch SHAs."
-            exit 1
-          fi
-
-          echo "main_sha=$MAIN_SHA" >> "$GITHUB_OUTPUT"
-          echo "staging_sha=$STAGING_SHA" >> "$GITHUB_OUTPUT"
-
-          echo "Validated main: $MAIN_SHA"
-          echo "Validated staging: $STAGING_SHA"
-
-      - name: Prepare staging backup and next-cycle candidate
-        id: prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_MAIN: ${{ steps.reset_plan.outputs.main_sha }}
-          EXPECTED_STAGING: ${{ steps.reset_plan.outputs.staging_sha }}
-        run: |
-          set -euo pipefail
-
-          MAIN_SHA=$(gh api \
-            "repos/${{ github.repository }}/git/ref/heads/main" \
-            --jq '.object.sha')
-
-          STAGING_SHA=$(gh api \
-            "repos/${{ github.repository }}/git/ref/heads/staging" \
-            --jq '.object.sha')
-
-          if [[ "$MAIN_SHA" != "$EXPECTED_MAIN" ||
-                "$STAGING_SHA" != "$EXPECTED_STAGING" ]]; then
-            echo "Main or staging changed after safety validation."
-            echo "Preparation aborted. Run the workflow again."
-            exit 1
-          fi
-
-          BACKUP="backup/staging-before-reset-${STAGING_SHA:0:12}"
-          CANDIDATE="staging-next-cycle-${{ github.run_id }}"
-
-          create_or_verify_branch() {
-            local branch="$1"
-            local sha="$2"
-            local existing
-
-            existing=$(gh api \
-              "repos/${{ github.repository }}/git/ref/heads/$branch" \
-              --jq '.object.sha' 2>/dev/null) || existing=""
-
-            if [[ -n "$existing" ]]; then
-              if [[ "$existing" != "$sha" ]]; then
-                echo "Branch $branch exists at an unexpected SHA."
-                exit 1
-              fi
-              echo "Verified existing branch: $branch"
-            else
-              gh api \
-                "repos/${{ github.repository }}/git/refs" \
-                --method POST \
-                -f ref="refs/heads/$branch" \
-                -f sha="$sha"
-            fi
-          }
-
-          create_or_verify_branch "$BACKUP" "$STAGING_SHA"
-          create_or_verify_branch "$CANDIDATE" "$MAIN_SHA"
-
-          echo "backup=$BACKUP" >> "$GITHUB_OUTPUT"
-          echo "candidate=$CANDIDATE" >> "$GITHUB_OUTPUT"
-
-          {
-            echo "## Next-cycle preparation"
-            echo ""
-            echo "- Main SHA: \`$MAIN_SHA\`"
-            echo "- Staging SHA: \`$STAGING_SHA\`"
-            echo "- Backup: \`$BACKUP\`"
-            echo "- Candidate: \`$CANDIDATE\`"
-            echo ""
-            echo "**Staging has not been modified.**"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Preserve verification scripts
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$RUNNER_TEMP/next-cycle-scripts"
-
-          cp .github/scripts/verify_next_cycle.py \
-            "$RUNNER_TEMP/next-cycle-scripts/"
-
-          cp .github/scripts/staging_reset_check.py \
-            "$RUNNER_TEMP/next-cycle-scripts/"
-
-          cp .github/scripts/staging_reset_plan.py \
-            "$RUNNER_TEMP/next-cycle-scripts/"
-
-          cp .github/scripts/uat_carryover.py \
-            "$RUNNER_TEMP/next-cycle-scripts/"
-
-          cp .github/scripts/branch_audit.py \
-            "$RUNNER_TEMP/next-cycle-scripts/"
-
-      - name: Integrate UAT carryover
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANDIDATE_BRANCH: ${{ steps.prepare.outputs.candidate }}
-        run: |
-          set -euo pipefail
-
-          git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-
-          python3 .github/scripts/uat_carryover.py
-
-      - name: Verify next-cycle candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_MAIN: ${{ steps.reset_plan.outputs.main_sha }}
-          EXPECTED_STAGING: ${{ steps.reset_plan.outputs.staging_sha }}
-          CANDIDATE_BRANCH: ${{ steps.prepare.outputs.candidate }}
-          BACKUP_BRANCH: ${{ steps.prepare.outputs.backup }}
-        run: |
-          set -uo pipefail
-
-          PYTHONPATH="$RUNNER_TEMP/next-cycle-scripts" \
-            python3 "$RUNNER_TEMP/next-cycle-scripts/verify_next_cycle.py" \
-            | tee next-cycle-verification.md
-
-          RESULT=${PIPESTATUS[0]}
-
-          cat next-cycle-verification.md >> "$GITHUB_STEP_SUMMARY"
-
-          if [[ "$RESULT" -ne 0 ]]; then
-            echo "Candidate verification failed. Staging remains unchanged."
-            exit "$RESULT"
-          fi
-
-          echo "Candidate verification passed."

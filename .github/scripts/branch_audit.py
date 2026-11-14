@@ -292,6 +292,8 @@ def classify(branch, prs, completed_release, release_verified):
     if not release_prs:
         return "Needs review", "No direct merged PR into completed release"
 
+    from release_evidence import verify_promoted_pr
+
     for pr in release_prs:
         reviewed_sha = pr["head"]["sha"]
         squash_sha = pr["merge_commit_sha"]
@@ -302,7 +304,7 @@ def classify(branch, prs, completed_release, release_verified):
         if not squash_sha:
             continue
 
-        if is_ancestor(squash_sha, "origin/main"):
+        if verify_promoted_pr(pr):
             return (
                 "Cleanup candidate",
                 f"PR #{pr['number']} tip verified; squash deployed to main"
@@ -312,6 +314,26 @@ def classify(branch, prs, completed_release, release_verified):
         "Needs review",
         "No release PR matches current tip with deployed squash commit"
     )
+
+def verified_release_pr(pr, repository, release):
+    """Require the declared release tip in a real release-to-main merge."""
+    if not (
+        pr.get("merged_at")
+        and pr.get("base", {}).get("ref") == "main"
+        and pr.get("head", {}).get("ref") == release
+        and pr["head"].get("repo")
+        and pr["base"].get("repo")
+        and pr["head"]["repo"]["full_name"] == repository
+        and pr["base"]["repo"]["full_name"] == repository
+        and pr.get("merge_commit_sha")
+    ):
+        return False
+    merge = pr["merge_commit_sha"]
+    if not is_ancestor(merge, "origin/main"):
+        return False
+    parents = git("rev-list", "--parents", "-n", "1", merge).split()
+    return len(parents) == 3 and is_ancestor(f"origin/{release}", parents[2])
+
 
 def get_cleanup_candidates(repository, completed_release):
     """
@@ -338,19 +360,9 @@ def get_cleanup_candidates(repository, completed_release):
         "-f", "per_page=100",
     )
 
-    release_verified = (
-        completed_release in existing_branches
-        and any(
-            pr["merged_at"]
-            and pr["head"]["ref"] == completed_release
-            and pr["head"]["repo"]
-            and pr["head"]["repo"]["full_name"] == repository
-            for pr in release_prs
-        )
-        and is_ancestor(
-            f"origin/{completed_release}",
-            "origin/main",
-        )
+    release_verified = completed_release in existing_branches and any(
+        verified_release_pr(pr, repository, completed_release)
+        for pr in release_prs
     )
 
     branches = sorted({
