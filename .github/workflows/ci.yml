@@ -8,6 +8,13 @@ permissions:
   contents: read
 
 jobs:
+  release-safety:
+    name: Release workflow safety tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 -m unittest discover -s tests -v
+
   quality:
     name: PHP and theme checks
     runs-on: ubuntu-22.04
