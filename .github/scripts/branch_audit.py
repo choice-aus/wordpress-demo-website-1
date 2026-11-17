@@ -21,9 +21,16 @@ TICKET_PATTERN = re.compile(r"\b[A-Z]{3}-\d+\b")
 
 def run(*command):
     """Execute a command and return its output."""
-    result = subprocess.run(
-        command, text=True, capture_output=True, check=True
-    )
+    try:
+        result = subprocess.run(
+            command, text=True, capture_output=True, check=True
+        )
+    except subprocess.CalledProcessError as error:
+        # Preserve Git/GitHub rejection details in Actions logs and evidence.
+        # CalledProcessError's string contains only the command and exit code.
+        if error.stderr:
+            print(error.stderr, file=sys.stderr, end="" if error.stderr.endswith("\n") else "\n")
+        raise
     return result.stdout.strip()
 
 

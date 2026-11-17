@@ -22,6 +22,18 @@ import uat_carryover as carry
 import verify_next_cycle as verify
 
 
+class CommandDiagnosticsTests(unittest.TestCase):
+    def test_rejected_push_reports_git_error_and_still_fails(self):
+        error = subprocess.CalledProcessError(
+            1, ['git', 'push'], stderr='remote: GH013: Cannot force-push to this branch\n')
+        with patch.object(branch_audit.subprocess, 'run', side_effect=error), \
+             contextlib.redirect_stderr(io.StringIO()) as output:
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                branch_audit.git('push', 'origin', 'candidate:refs/heads/staging')
+        self.assertIs(raised.exception, error)
+        self.assertIn('GH013: Cannot force-push to this branch', output.getvalue())
+
+
 class GitEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
