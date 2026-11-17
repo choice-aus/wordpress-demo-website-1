@@ -78,6 +78,9 @@ main, staging, the selected release and eligible cleanup branch SHAs in an
 assessment artifact. Review that snapshot before approving the `branch-cleanup`
 environment, which must have at least one required reviewer configured. All
 operations stop if that environment rule cannot be verified.
+The selected release must itself be cleanup eligible, with no open source PRs
+or protected PR labels, before assessment or any writes can proceed. This also
+applies to preparation-only runs.
 
 - `confirm_closed=false` performs assessment only.
 - `confirm_closed=true`, `preparation_only=true` prepares and verifies a candidate
@@ -107,6 +110,10 @@ Backups use `backup/staging-before-reset-<original-SHA-prefix>` and are never
 moved or deleted. Candidates use `staging-next-cycle-<run-id>-<attempt>` so a rerun
 preserves previous preparation results. The existing candidate
 `staging-next-cycle-43378704931` and original backup are retained.
+When retrying failed jobs, execution uses the successful assessment's artifact
+name and revalidates its original snapshot. Re-running all jobs creates a new
+assessment artifact for that attempt. If the snapshot is stale, start a new
+assessment and review it before approving execution.
 
 Release eligibility and branch SHAs are revalidated after approval and before
 writes. Staging updates use an explicit SHA lease; cleanup uses one atomic push

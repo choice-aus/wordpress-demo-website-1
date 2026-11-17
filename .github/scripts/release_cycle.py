@@ -31,6 +31,12 @@ def snapshot(repository, release):
     latest = get_latest_release(repository)
     verified, assessments = get_cleanup_candidates(repository, release)
     require(verified, "Completed release is not verified in main")
+    cleanup = {item["branch"]: item["sha"] for item in assessments
+               if item["status"] == "Cleanup candidate"}
+    release_assessment = next((item for item in assessments if item["branch"] == release), {})
+    require(release in cleanup,
+            "Completed release is not cleanup eligible: "
+            + release_assessment.get("reason", "No eligible release assessment"))
     return {
         "repository": repository,
         "release": release,
@@ -39,8 +45,7 @@ def snapshot(repository, release):
         "main": git("rev-parse", "origin/main"),
         "staging": git("rev-parse", "origin/staging"),
         "release_sha": git("rev-parse", f"origin/{release}"),
-        "cleanup": {item["branch"]: item["sha"] for item in assessments
-                    if item["status"] == "Cleanup candidate"},
+        "cleanup": cleanup,
     }
 
 

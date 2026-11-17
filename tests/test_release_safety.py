@@ -219,6 +219,66 @@ class CycleTests(unittest.TestCase):
             cycle.execute(self.plan, False)
         self.assertEqual(events, ['prepare', 'reset', 'cleanup'])
 
+    def test_ineligible_release_blocks_all_execution_before_writes(self):
+        for latest in (True, False):
+            for preparation_only in (True, False):
+                for reason in ('Open PR exists', 'Protected PR label: deferred'):
+                    release = 'release-new' if latest else 'release-old'
+                    selected = dict(self.plan, release=release, prepare=latest,
+                                    cleanup={'feature/new': 'd' * 40})
+                    assessments = [dict(branch=release, sha='c' * 40,
+                                        status='Keep', reason=reason)]
+                    with self.subTest(latest=latest, preparation_only=preparation_only, reason=reason), \
+                         patch.object(cycle, 'get_latest_release', return_value='release-new'), \
+                         patch.object(cycle, 'get_cleanup_candidates', return_value=(True, assessments)), \
+                         patch.object(cycle, 'approval_environment'), \
+                         patch.object(cycle, 'git') as git, \
+                         patch.object(cycle, 'prepare') as prepare, \
+                         patch.object(cycle, 'reset_staging') as reset, \
+                         patch.object(cycle, 'cleanup') as cleanup:
+                        with self.assertRaisesRegex(RuntimeError, reason):
+                            cycle.execute(selected, preparation_only)
+                        git.assert_not_called()
+                        prepare.assert_not_called()
+                        reset.assert_not_called()
+                        cleanup.assert_not_called()
+
+    def test_release_becoming_ineligible_after_approval_blocks_execution(self):
+        assessments = [dict(branch='release-new', sha='c' * 40,
+                            status='Keep', reason='Open PR exists')]
+        with patch.object(cycle, 'get_latest_release', return_value='release-new'), \
+             patch.object(cycle, 'get_cleanup_candidates', return_value=(True, assessments)), \
+             patch.object(cycle, 'prepare') as prepare, \
+             patch.object(cycle, 'reset_staging') as reset, \
+             patch.object(cycle, 'cleanup') as cleanup:
+            with self.assertRaisesRegex(RuntimeError, 'not cleanup eligible'):
+                cycle.execute(self.plan, False)
+            prepare.assert_not_called()
+            reset.assert_not_called()
+            cleanup.assert_not_called()
+
+    def test_release_becoming_ineligible_during_preparation_blocks_candidate_creation(self):
+        eligible = [dict(branch=branch, sha=sha, status='Cleanup candidate')
+                    for branch, sha in self.plan['cleanup'].items()]
+        blocked = [dict(branch='release-new', sha='c' * 40,
+                        status='Keep', reason='Protected PR label: deferred')]
+        refs = {'origin/main': self.plan['main'], 'origin/staging': self.plan['staging'],
+                'origin/release-new': self.plan['release_sha']}
+        with patch.object(cycle, 'get_latest_release', return_value='release-new'), \
+             patch.object(cycle, 'get_cleanup_candidates', side_effect=[
+                 (True, eligible), (True, eligible), (True, blocked)]), \
+             patch.object(cycle, 'git', side_effect=lambda *args: refs[args[1]]), \
+             patch.object(cycle, 'approval_environment'), \
+             patch.object(cycle, 'check_preparation_safety'), \
+             patch.dict(os.environ, dict(GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1')), \
+             patch.object(cycle, 'create_or_verify') as create, \
+             patch.object(cycle.uat_carryover, 'main') as carryover:
+            with self.assertRaisesRegex(RuntimeError, 'not cleanup eligible'):
+                cycle.prepare(self.plan)
+            create.assert_called_once_with(self.plan['repository'],
+                                           'backup/staging-before-reset-' + 'b' * 12, 'b' * 40)
+            carryover.assert_not_called()
+
     def test_every_approved_sha_and_release_eligibility_is_rechecked(self):
         for field in ('main', 'staging', 'release_sha', 'latest', 'prepare', 'cleanup'):
             changed = copy.deepcopy(self.plan)
