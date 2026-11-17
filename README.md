@@ -134,3 +134,14 @@ python3 -m unittest discover -s tests -v
 The tests use temporary Git repositories and mock all pushes; they do not modify
 remote branches. Preparation-only Actions runs do write candidate and backup
 branches, so running that mode still requires approval to publish those refs.
+
+## Development backlog
+
+- Enforce commit titles early using the same `[ABC-123] - Description` rule
+  locally and in CI. Add an installable `commit-msg` hook (the message is not
+  available to a `pre-commit` hook), document setup for every checkout, and add
+  a `pre-push` check for invalid titles introduced by rebases or other tools.
+- Expose commit-title validation as a dedicated required status check for PRs
+  into staging, release branches and main. Keep the existing promotion-path
+  and PR-title checks, and test that invalid titles block both local commits
+  and PR merging. Include deliberate handling of merge and squash commits.
