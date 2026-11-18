@@ -54,8 +54,10 @@ def snapshot(repository, release, options=None):
                         for item in assessments],
     }
     if options is not None:
-        require(release == latest or not any(options.values()),
-                "Older-release cleanup cannot create a next release or remove a cycle candidate")
+        options = dict(options)
+        if release != latest:
+            require(not options.get("next_release"), "Older-release cleanup cannot create a next release")
+            options["remove_candidate"] = False  # No staging promotion or candidate in this mode.
         if options.get("next_release"):
             validate_next_release(options["next_release"], release)
             require(not matching_refs(repository, options["next_release"]),
@@ -156,7 +158,32 @@ def cleanup(plan, staging=None):
     print("Deleted verified branches: " + ", ".join(sorted(plan["cleanup"])))
 
 
-def finish_cycle(plan, candidate, candidate_sha, backup):
+def remove_promoted_candidate(plan, candidate, candidate_sha, backup):
+    """A verified staging ref replaces the temporary name, independently of release cleanup."""
+    repository = plan["repository"]
+    require(remote_sha(repository, "staging") == candidate_sha, "Staging changed before candidate removal")
+    require(remote_sha(repository, backup) == plan["staging"], "Backup changed before candidate removal")
+    require(remote_sha(repository, candidate) == candidate_sha, "Candidate changed before candidate removal")
+    approval_environment(repository)
+    verify_remote_repository(repository)
+    require(remote_sha(repository, "staging") == candidate_sha, "Staging changed before candidate removal")
+    git("push", f"--force-with-lease=refs/heads/{candidate}:{candidate_sha}",
+        "origin", f":refs/heads/{candidate}")
+    print(f"Removed promoted temporary candidate {candidate}; staging and backup retained")
+
+
+def promotion_receipt(plan, candidate, candidate_sha, backup, candidate_removed):
+    # Written before unrelated release cleanup so even a later failure retains
+    # the promotion/removal evidence without needing the temporary branch.
+    receipt = dict(schema=1, repository=plan["repository"], main=plan["main"], release=plan["release"],
+                   original_staging=plan["staging"], candidate=candidate, candidate_sha=candidate_sha,
+                   backup=backup, backup_sha=plan["staging"], candidate_removed=candidate_removed,
+                   run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
+                   promoted_at=datetime.now(timezone.utc).isoformat())
+    Path("promotion-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+def finish_cycle(plan, candidate, candidate_sha, backup, candidate_removed=False):
     """Only after promotion and cleanup succeed, perform reviewed follow-up work."""
     repository = plan["repository"]
     options = plan.get("options", {})
@@ -164,7 +191,8 @@ def finish_cycle(plan, candidate, candidate_sha, backup):
     require(remote_sha(repository, "main") == plan["main"], "Main changed after cleanup")
     require(remote_sha(repository, "staging") == candidate_sha, "Staging changed after cleanup")
     require(remote_sha(repository, backup) == plan["staging"], "Backup changed after cleanup")
-    require(remote_sha(repository, candidate) == candidate_sha, "Candidate changed after cleanup")
+    if not candidate_removed:
+        require(remote_sha(repository, candidate) == candidate_sha, "Candidate changed after cleanup")
     approval_environment(repository)
     verify_remote_repository(repository)
     next_release = options.get("next_release", "")
@@ -175,16 +203,9 @@ def finish_cycle(plan, candidate, candidate_sha, backup):
         github("api", f"repos/{repository}/git/refs", "--method", "POST",
                "-f", f"ref=refs/heads/{next_release}", "-f", f"sha={plan['main']}")
         print(f"Created next release {next_release} from main at {plan['main']}")
-    removed = bool(options.get("remove_candidate"))
-    if removed:
-        # Staging retains the exact verified candidate commit; keep the backup.
-        require(remote_sha(repository, "staging") == candidate_sha, "Staging changed before candidate removal")
-        git("push", f"--force-with-lease=refs/heads/{candidate}:{candidate_sha}",
-            "origin", f":refs/heads/{candidate}")
-        print(f"Removed successful-cycle candidate {candidate}; staging and backup retained")
     receipt = dict(schema=1, repository=repository, release=plan["release"], main=plan["main"],
                    original_staging=plan["staging"], candidate=candidate, candidate_sha=candidate_sha,
-                   backup=backup, backup_sha=plan["staging"], candidate_removed=removed,
+                   backup=backup, backup_sha=plan["staging"], candidate_removed=candidate_removed,
                    next_release=next_release, run_id=os.environ["GITHUB_RUN_ID"],
                    run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
                    completed_at=datetime.now(timezone.utc).isoformat())
@@ -194,11 +215,17 @@ def finish_cycle(plan, candidate, candidate_sha, backup):
 def execute(plan, preparation_only=True):
     revalidate(plan)
     promoted = None
+    candidate_removed = False
     if plan["prepare"]:
         candidate, sha, backup = prepare(plan)
         if not preparation_only:
             reset_staging(plan, candidate, sha, backup)
             promoted = sha
+            promotion_receipt(plan, candidate, sha, backup, False)
+            if plan.get("options", {}).get("remove_candidate", True):
+                remove_promoted_candidate(plan, candidate, sha, backup)
+                candidate_removed = True
+                promotion_receipt(plan, candidate, sha, backup, True)
     else:
         print("Older completed release: cleanup only; preparation and staging reset disabled")
     if preparation_only:
@@ -206,7 +233,7 @@ def execute(plan, preparation_only=True):
         return
     cleanup(plan, promoted)
     if promoted:
-        finish_cycle(plan, candidate, sha, backup)
+        finish_cycle(plan, candidate, sha, backup, candidate_removed)
 
 
 def main():
@@ -217,7 +244,7 @@ def main():
     parser.add_argument("--completed-release", default="")
     parser.add_argument("--preparation-only", choices=("true", "false"), default="true")
     parser.add_argument("--next-release", default="")
-    parser.add_argument("--remove-candidate", choices=("true", "false"), default="false")
+    parser.add_argument("--remove-candidate", choices=("true", "false"), default="true")
     args = parser.parse_args()
     repository = os.environ["GITHUB_REPOSITORY"]
     if args.action == "assess":

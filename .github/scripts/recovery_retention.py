@@ -12,7 +12,7 @@ import subprocess
 import sys
 import zipfile
 
-from branch_audit import git, github, is_ancestor
+from branch_audit import git, github, is_ancestor, get_open_prs
 from delete_branch import verify_remote_repository
 from release_cycle import approval_environment, require
 from staging_reset_check import check_merge_commits, merged_pull_requests
@@ -21,6 +21,54 @@ from staging_reset_plan import released_feature_commits
 SHA = re.compile(r"[0-9a-f]{40}")
 EVIDENCE_NAME = re.compile(r"release-cycle-evidence-(\d+)")
 DEFAULT_MIN_DAYS = 30
+CANDIDATE_NAME = re.compile(r"staging-next-cycle-(\d+)(?:-(\d+))?")
+
+
+def ref_kind(branch):
+    if branch == "staging-next-cycle" or branch.startswith("staging-next-cycle-"):
+        return "candidate"
+    if branch.startswith("backup/"):
+        return "backup"
+    return "other"
+
+
+def scoped_refs(refs, scope):
+    require(scope in ("candidates", "backups", "all"), "Unknown housekeeping scope")
+    return {branch: sha for branch, sha in refs.items()
+            if branch in ("main", "staging") or scope == "all"
+            or ref_kind(branch) == ("candidate" if scope == "candidates" else "backup")}
+
+
+def candidate_run_states(repository, refs):
+    """Use run metadata, not expiring artifacts, to protect active preparations."""
+    if not any(ref_kind(branch) == "candidate" for branch in refs):
+        return {}
+    runs = {}
+    for workflow in ("branch-cleanup.yml", "prepare-next-uat-cycle.yml"):
+        for run in paginated(f"repos/{repository}/actions/workflows/{workflow}/runs"):
+            runs[str(run["id"])] = run
+    active = any(run["status"] != "completed" for run in runs.values())
+    open_prs = {}
+    for pr in get_open_prs(repository):
+        head = pr.get("head", {})
+        if head.get("repo") and head["repo"].get("full_name") == repository:
+            open_prs.setdefault(head["ref"], []).append(pr["number"])
+    states = {}
+    for branch in refs:
+        if ref_kind(branch) != "candidate":
+            continue
+        match = CANDIDATE_NAME.fullmatch(branch)
+        run = runs.get(match[1]) if match else None
+        if run:
+            attempt = match[2] or "1"
+            if str(run.get("run_attempt", 1)) != attempt:
+                run = github("api", f"repos/{repository}/actions/runs/{match[1]}/attempts/{attempt}")
+            states[branch] = dict(legacy=False, status=run["status"], conclusion=run.get("conclusion"),
+                                  run_id=match[1], run_attempt=attempt)
+        else:
+            states[branch] = dict(legacy=True, status="unknown", active_preparations=active)
+        states[branch]["open_prs"] = sorted(open_prs.get(branch, []))
+    return states
 
 
 def validate_policy(keep_cycles, min_days):
@@ -158,10 +206,16 @@ def preservation_checker(repository, main_sha, staging_sha):
 
 
 def build_plan(repository, refs, cycles, protected, assessed_at, preserved,
-               keep_cycles=3, min_days=DEFAULT_MIN_DAYS):
+               keep_cycles=3, min_days=DEFAULT_MIN_DAYS, candidate_states=None,
+               scope="all", include_legacy_candidates=False):
     validate_policy(keep_cycles, min_days)
     now = datetime.fromisoformat(assessed_at)
     require(now.tzinfo is not None, "Retention timestamp must include a timezone")
+    refs = scoped_refs(refs, scope)
+    if candidate_states is None:
+        candidate_states = {item["candidate"]: dict(legacy=False, status="completed", conclusion="success")
+                            for item in cycles}
+    candidate_states = {branch: state for branch, state in candidate_states.items() if branch in refs}
     cycles = sorted(cycles, key=lambda item: (item["completed_at"], item["run_id"], item["run_attempt"]), reverse=True)
     newest = {(item["run_id"], item["run_attempt"]) for item in cycles[:keep_cycles]}
     associations = {}
@@ -172,8 +226,28 @@ def build_plan(repository, refs, cycles, protected, assessed_at, preserved,
     for branch, sha in sorted(refs.items()):
         if branch in ("main", "staging"):
             continue
+        kind = ref_kind(branch)
         evidence = associations.get(branch, [])
-        if branch in protected:
+        if kind == "candidate":
+            state = candidate_states.get(branch, dict(legacy=True, status="unknown"))
+            if state.get("open_prs"):
+                reason = "Candidate is the source of an open PR"
+            elif not state["legacy"] and state["status"] != "completed":
+                reason = "Preparation run is still active or waiting; candidate is needed"
+            elif state["legacy"] and not include_legacy_candidates:
+                reason = "Legacy candidate needs explicit review; enable include_legacy_candidates to assess its content"
+            elif state["legacy"] and state.get("active_preparations"):
+                reason = "Cannot retire a legacy candidate while a preparation run is active or waiting"
+            elif not preserved(sha):
+                reason = "Candidate has unresolved or unique changes; retain for use/investigation"
+            else:
+                reason = ("Reviewed legacy candidate is redundant; all content remains preserved"
+                          if state["legacy"] else
+                          "Completed preparation is superseded/promoted; all candidate content remains preserved")
+                cleanup[branch] = sha
+        elif kind != "backup":
+            reason = "Unsupported recovery ref name; manual investigation required"
+        elif branch in protected:
             reason = "Referenced by failed, preparation-only or unverified run evidence"
         elif not evidence:
             reason = "No available verified completed-cycle evidence; retain legacy/active recovery ref"
@@ -189,26 +263,31 @@ def build_plan(repository, refs, cycles, protected, assessed_at, preserved,
         else:
             reason = "Verified completed cycle outside retention; recovery content remains accounted for"
             cleanup[branch] = sha
-        assessments.append(dict(branch=branch, sha=sha,
+        assessments.append(dict(branch=branch, sha=sha, kind=kind,
                                 status="Cleanup candidate" if branch in cleanup else "Keep", reason=reason))
-    return dict(schema=1, repository=repository, assessed_at=assessed_at, keep_cycles=keep_cycles,
+    return dict(schema=2, repository=repository, assessed_at=assessed_at, keep_cycles=keep_cycles,
                 min_days=min_days, refs=refs, cycles=cycles, protected=sorted(protected),
+                candidate_states=candidate_states, scope=scope, include_legacy_candidates=include_legacy_candidates,
                 assessments=assessments, cleanup=cleanup)
 
 
-def assess(repository, assessed_at, keep_cycles, min_days):
+def assess(repository, assessed_at, keep_cycles, min_days, scope="all", include_legacy_candidates=False):
     validate_policy(keep_cycles, min_days)
-    refs = recovery_refs()
+    refs = scoped_refs(recovery_refs(), scope)
     require("main" in refs and "staging" in refs, "Main and staging refs are required")
-    cycles, protected = completed_cycles(repository)
+    cycles, protected = completed_cycles(repository) if scope != "candidates" else ([], set())
+    states = candidate_run_states(repository, refs) if scope != "backups" else {}
     return build_plan(repository, refs, cycles, protected, assessed_at,
-                      preservation_checker(repository, refs["main"], refs["staging"]), keep_cycles, min_days)
+                      preservation_checker(repository, refs["main"], refs["staging"]), keep_cycles, min_days,
+                      states, scope, include_legacy_candidates)
 
 
 def execute(plan):
+    require(plan.get("schema") == 2, "Housekeeping plan format changed; rerun assessment")
     require(plan["repository"] == os.environ["GITHUB_REPOSITORY"], "Retention plan repository mismatch")
     approval_environment(plan["repository"])
-    current = assess(plan["repository"], plan["assessed_at"], plan["keep_cycles"], plan["min_days"])
+    current = assess(plan["repository"], plan["assessed_at"], plan["keep_cycles"], plan["min_days"],
+                     plan["scope"], plan["include_legacy_candidates"])
     require(current == plan, "Recovery refs, evidence or preservation changed; rerun retention assessment")
     if not plan["cleanup"]:
         print("No recovery refs are eligible for deletion.")
@@ -229,18 +308,47 @@ def main():
     parser.add_argument("--plan", default="retention-plan.json")
     parser.add_argument("--keep-cycles", type=int, default=3)
     parser.add_argument("--min-days", type=int, default=DEFAULT_MIN_DAYS,
-                        help="Minimum recovery-ref age in days (default: 30; use 3 for demo assessment)")
+                        help="Minimum backup age in days (default: 30; use 3 for demo assessment)")
+    parser.add_argument("--scope", choices=("candidates", "backups", "all"), default="candidates")
+    parser.add_argument("--include-legacy-candidates", choices=("true", "false"), default="false")
     args = parser.parse_args()
     repository = os.environ["GITHUB_REPOSITORY"]
     if args.action == "execute":
         execute(json.loads(Path(args.plan).read_text()))
         return
     approval_environment(repository)
-    plan = assess(repository, datetime.now(timezone.utc).isoformat(), args.keep_cycles, args.min_days)
+    plan = assess(repository, datetime.now(timezone.utc).isoformat(), args.keep_cycles, args.min_days,
+                  args.scope, args.include_legacy_candidates == "true")
     Path(args.plan).write_text(json.dumps(plan, indent=2) + "\n")
-    print(f"Retention: keep {args.keep_cycles} latest successful cycles and at least {args.min_days} days.")
-    for item in plan["assessments"]:
-        print(f"- {item['branch']} at {item['sha']}: {item['status']} — {item['reason']}")
+    print(report(plan))
+
+
+def report(plan):
+    assessments = plan["assessments"]
+    delete_count = len(plan["cleanup"])
+    noun = "branch" if delete_count == 1 else "branches"
+    lines = ["## Recovery housekeeping assessment", "",
+             f"**{delete_count} {noun} eligible for deletion; {len(assessments) - delete_count} retained.**", "",
+             f"Scope: {plan['scope']}. Candidates have no age/cycle retention; active runs, open PRs and unique changes are protected.",
+             f"Backup policy: keep {plan['keep_cycles']} successful cycles and at least {plan['min_days']} days."]
+    for kind, title in (("candidate", "Temporary candidates"), ("backup", "Backups"), ("other", "Other recovery refs")):
+        items = [item for item in assessments if item["kind"] == kind]
+        if not items:
+            continue
+        deleted = [item for item in items if item["branch"] in plan["cleanup"]]
+        kept = [item for item in items if item["branch"] not in plan["cleanup"]]
+        lines.extend(["", f"### {title}: {len(deleted)} delete, {len(kept)} keep"])
+        for item in deleted:
+            lines.append(f"- **DELETE** `{item['branch']}` at `{item['sha']}` — {item['reason']}")
+        reasons = {}
+        for item in kept:
+            reasons.setdefault(item["reason"], []).append(item["branch"])
+        for reason, branches in reasons.items():
+            lines.extend(["", f"Keep — {reason} ({len(branches)}):"])
+            lines.extend(f"- `{branch}`" for branch in branches)
+    if plan["scope"] == "candidates":
+        lines.extend(["", "**Backups are outside this assessment and will not be deleted.**"])
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
