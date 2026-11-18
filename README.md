@@ -89,11 +89,24 @@ applies to preparation-only runs.
   successful carryovers, but never resets staging or deletes branches.
 - `confirm_closed=true`, `preparation_only=false` prepares, verifies, resets staging
   to the verified candidate and deletes eligible feature/release branches after
-  environment approval. Each feature's exact combined PR diff must match its
-  squash diff in main; the release must have reached main through a merge commit.
+  environment approval. Each work branch must pass exact combined-diff or
+  clean reconstructed-tree verification against its squash in main; the release
+  must have reached main through a merge commit. The reconstruction handles
+  changes already released separately, including the DEV-215 historical case.
 - `audit_mode=specific` selecting an older completed release allows verified branch
   cleanup only. It never prepares a candidate or resets staging. Preparation-only
   mode on an older release performs no writes.
+- `next_release=release-<new-name>` optionally creates the next release from the
+  assessed main SHA after staging promotion and branch cleanup succeed. The name
+  must be new; an existing branch is never moved or adopted. Leave blank to skip.
+- `remove_candidate=true` optionally deletes only this run's candidate after
+  promotion and cleanup succeed, using its exact SHA lease. Staging retains the
+  verified commit and the original backup remains. The default is `false`.
+  Preparation-only runs never create the next release or remove a candidate.
+  Older-release cleanup rejects requests for either follow-up operation.
+
+The assessment lists **all assessed branches**, including excluded branches
+and their reasons. A missing/deleted selected release gets a specific error.
 
 The **Prepare next UAT cycle** entry point delegates to the same workflow with
 preparation-only enabled, including the same approval and concurrency controls.
@@ -106,11 +119,21 @@ when another carryover fails. Every failed carryover is reported in the job
 summary and `carryover-manifest.json`; any failure or unexplained staging commit
 blocks staging reset and cleanup. Merge resolutions in staging must also pass
 Git's reconstructed-merge check. Unlabelled unreleased changes block reset.
+Historical `carryover-next-cycle` and `uat-failed-retest` labels on merged staging
+PRs no longer prevent cleanup once a later, verified release covers their
+reviewed revisions and the current work branch tip. The labels are not removed:
+their history is retained. Labels on release PRs, later staging revisions,
+`deferred`, `rejected` and open PRs continue to protect branches. Already deployed
+labelled revisions are excluded from carryover without depending on the source
+branch still existing. Unreleased revisions still require preservation.
 
 Backups use `backup/staging-before-reset-<original-SHA-prefix>` and are never
-moved or deleted. Candidates use `staging-next-cycle-<run-id>-<attempt>` so a rerun
-preserves previous preparation results. The existing candidate
-`staging-next-cycle-43378704931` and original backup are retained.
+overwritten or deleted by **Branch cleanup**. Candidates use
+`staging-next-cycle-<run-id>-<attempt>` so a rerun preserves previous preparation
+results. A successful full latest-release closure writes `closure-receipt.json`
+to the evidence artifact. Candidate removal is optional; old backups/candidates
+require the separate retention workflow below. Existing refs are not pruned
+merely by deploying these scripts.
 When retrying failed jobs, execution uses the successful assessment's artifact
 name and revalidates its original snapshot. Re-running all jobs creates a new
 assessment artifact for that attempt. If the snapshot is stale, start a new
@@ -125,6 +148,54 @@ Git offers no atomic transaction covering API metadata and unrelated refs: avoid
 merging a new release or changing carryover labels during closure. If eligibility
 changes after staging promotion, cleanup stops and the verified candidate and
 backup remain available; the workflow does not attempt a rollback.
+If a next-release creation or optional candidate deletion fails after cleanup,
+the earlier successful operations remain in place; inspect the evidence before
+retrying. Do not recreate the deleted completed release merely to rerun it.
+
+## Recovery branch retention
+
+Run **Recovery branch housekeeping** from the reviewed workflow revision,
+using main after promotion. Start with `confirm_delete=false` to assess only.
+It shares the closure concurrency lock and never resets staging or deletes
+work/release branches. Review `retention-plan.json` and the reasons in the
+summary. With `confirm_delete=true`, the `branch-cleanup` environment approval
+is required, and all refs, run evidence and content preservation are revalidated
+before one atomic push with a lease for every deletion target.
+
+The default policy retains the latest **3 verified successful cycles** and
+everything younger than **30 days**. The workflow's `retention_days` input
+defaults to `30`; for this fast-changing demo, select `3` without editing code.
+It must be a positive whole number. The latest three successful cycles are
+always kept, regardless of age. Both the cycle-count and selected age thresholds
+must be passed before older recovery refs are eligible for deletion. The chosen
+value is stored in the assessment and reused during post-approval revalidation.
+Retention is not automatic after every release; it is a separate assessed action.
+
+For a demo preview, run **Recovery branch housekeeping** with `retention_days=3`
+and `confirm_delete=false`. Review the listed reasons, then use the same age
+with `confirm_delete=true` for an approved deletion run. Locally, the equivalent
+read-only assessment is `python3 .github/scripts/recovery_retention.py assess --min-days 3`
+with `GITHUB_REPOSITORY` and GitHub authentication configured. Omitting
+`--min-days` uses the script's `DEFAULT_MIN_DAYS` value of 30.
+
+Eligibility requires a successful full-closure run attempt and its matching
+receipt, or equivalent DEV-219/220 plan, manifest and full-success result artifacts.
+Each ref must still have the recorded SHA, and its content must be accounted
+for in current main/staging or verified release evidence. Failed, preparation-only,
+active or unverifiable recovery refs are retained. If a backup is shared with a
+failed/preparation-only run, it is retained too. Missing/expired artifacts and
+legacy names without sufficient proof produce **Keep**, not deletion permission.
+Network/authentication errors block assessment rather than being treated as
+missing proof. Artifact retention therefore affects how much historical cleanup
+can be verified; unknown legacy refs need separate manual investigation.
+
+Suggested DEV-221 rollout: first assess `release-dev-215` from this feature's
+reviewed revision and run the retention script locally in assessment mode.
+After CI and staging/release testing promote the changes to main, the new
+housekeeping workflow can be dispatched in assessment-only mode. Close the
+next release with an explicit new release name and optional candidate removal.
+Verify main/staging and retained backup SHAs. Remote executions and deletions
+require explicit authorisation.
 
 Run the release safety tests locally with:
 
@@ -132,8 +203,9 @@ Run the release safety tests locally with:
 python3 -m unittest discover -s tests -v
 ```
 
-The tests use temporary Git repositories and mock all pushes; they do not modify
-remote branches. Preparation-only Actions runs do write candidate and backup
+The tests use temporary Git repositories, mock GitHub writes, and exercise real
+push hooks and atomic leases only against local bare repositories. They do not
+modify GitHub branches. Preparation-only Actions runs do write candidate and backup
 branches, so running that mode still requires approval to publish those refs.
 
 ## Local commit checks
@@ -166,15 +238,15 @@ so existing required-check enforcement is preserved.
 ## Development backlog and delivery plan
 
 Work is grouped into three batches so each item does not need its own feature
-branch. The current local feature starts with batch 1; subsequent batches can
-be reviewed independently and use new branches from main after promotion.
+branch. Ticket branches use `feature/DEV-123` (or an approved work-branch prefix)
+without a descriptive suffix and start from current main.
 
-1. **Branch and commit validation (current batch).** Support `feature/`, `fix/`,
+1. **Branch and commit validation (DEV-220, released).** Support `feature/`, `fix/`,
    `hotfix/` and `chore/` consistently in promotion, carryover, preservation and
    cleanup. Share the commit-title rule between installed local hooks and the
    dedicated CI check. Remaining rollout: require **Commit title check** in
    GitHub rulesets and install hooks in each developer checkout.
-2. **Release-cycle housekeeping (next batch).**
+2. **Release-cycle housekeeping (DEV-221, implemented locally; rollout pending).**
    - Extend exact release verification for changes already present in the
      release base, covering the pending `release-dev-215` case without weakening
      binary, mode or content checks. Report excluded branches and their reasons,
@@ -183,9 +255,11 @@ be reviewed independently and use new branches from main after promotion.
      evidence; preserve the audit history and keep current unreleased changes.
    - Handle `staging-next-cycle-*` candidates and `backup/staging-before-reset-*`
      together with an explicit retention plan, assessment and SHA leases.
-     Preserve active and failed preparations and their recovery refs. Agree
-     retention count/age and evidence requirements before deleting older refs;
-     branch age alone is insufficient proof that a backup is disposable.
+     Preserve active and failed preparations and their recovery refs. Agreed
+     normal policy: keep at least 3 successful cycles and 30 days; demos can set
+     `retention_days=3`. Require full-success run evidence and current
+     content-preservation proof. Branch age alone is
+     insufficient proof that a backup is disposable.
    - After a latest-release run successfully promotes staging and deletes its
      eligible work/release branches, optionally remove that run's temporary
      candidate using its exact SHA. Keep preparation-only and failed-run
@@ -205,6 +279,6 @@ be reviewed independently and use new branches from main after promotion.
    deploy-key and user/team bypass actors, but this has not been configured or
    validated for this repository. See the [GitHub ruleset API](https://docs.github.com/en/rest/repos/rules).
 
-No automated candidate/backup retention, next-release creation, or protection
-exception is enabled by batch 1. Existing cleanup approval, backup preservation,
-leased writes and preparation-only behavior continue to apply.
+Batch 2 follow-up writes are opt-in and housekeeping remains a separate approved
+action. Batch 3 protection exceptions have not been configured. Existing approval,
+leased writes and preparation-only restrictions continue to apply.

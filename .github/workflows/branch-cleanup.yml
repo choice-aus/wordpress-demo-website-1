@@ -20,6 +20,14 @@ on:
         description: Prepare and verify only; never reset staging or delete branches
         type: boolean
         default: true
+      next_release:
+        description: Optional new release-* branch to create from verified main after full cleanup
+        type: string
+        default: ''
+      remove_candidate:
+        description: Remove this run's candidate only after successful staging promotion and cleanup
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       audit_mode:
@@ -34,6 +42,12 @@ on:
       preparation_only:
         type: boolean
         default: true
+      next_release:
+        type: string
+        default: ''
+      remove_candidate:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -66,11 +80,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           AUDIT_MODE: ${{ inputs.audit_mode }}
           COMPLETED_RELEASE: ${{ inputs.completed_release }}
+          NEXT_RELEASE: ${{ inputs.next_release }}
+          REMOVE_CANDIDATE: ${{ inputs.remove_candidate }}
         run: |
           set -euo pipefail
           python3 .github/scripts/release_cycle.py assess \
             --audit-mode "$AUDIT_MODE" \
-            --completed-release "$COMPLETED_RELEASE" | tee release-cycle-assessment.txt
+            --completed-release "$COMPLETED_RELEASE" \
+            --next-release "$NEXT_RELEASE" \
+            --remove-candidate "$REMOVE_CANDIDATE" | tee release-cycle-assessment.txt
           {
             echo '## Release cycle assessment'
             echo 'Review the release, preparation eligibility and branch SHAs before approval.'
@@ -121,6 +139,7 @@ jobs:
           path: |
             release-cycle-plan.json
             carryover-manifest.json
+            closure-receipt.json
             release-cycle-result.txt
       - name: Report outcome
         if: ${{ always() }}

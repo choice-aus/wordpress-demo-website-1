@@ -43,8 +43,10 @@ def check_new_branch(head, remote):
 
 def check_pre_push(remote, lines):
     for line in lines:
-        local_ref, local_sha, _, remote_sha = line.split()
-        if local_sha == ZERO_SHA or not local_ref.startswith("refs/heads/"):
+        _, local_sha, remote_ref, remote_sha = line.split()
+        # Git can name the source HEAD or a raw SHA. The destination identifies
+        # a branch update regardless of how the caller specified its source.
+        if local_sha == ZERO_SHA or not remote_ref.startswith("refs/heads/"):
             continue  # Branch deletion and tags introduce no branch commits.
         if remote_sha == ZERO_SHA:
             check_new_branch(local_sha, remote)
