@@ -8,8 +8,9 @@ def verify_promoted_pr(pr, main_ref="origin/main"):
     """Compare the whole reviewed feature diff with its deployed squash diff.
 
     Exact binary diffs retain whitespace, modes, deletions and binary changes.
-    Different base content/conflict resolutions require manual review rather
-    than accepting a weaker per-commit or whitespace-normalised patch match.
+    If changes already exist in the release base, accept only a clean Git
+    reconstruction whose complete tree exactly matches the deployed squash.
+    Conflict resolutions still require manual review.
     """
     squash = pr.get("merge_commit_sha")
     head = pr.get("head", {}).get("sha")
@@ -39,4 +40,27 @@ def verify_promoted_pr(pr, main_ref="origin/main"):
         ])
 
     original = diff(bases[0], head)
-    return bool(original) and original == diff(parents[1], squash)
+    if not original:
+        return False
+    if original == diff(parents[1], squash):
+        return True
+    # Some reviewed changes may already have reached the release base through
+    # another squash. Reconstruct a clean integration and require the complete
+    # resulting tree (including binary blobs and modes) to equal the squash.
+    # Conflict resolutions and extra release changes remain unverified.
+    merge = subprocess.run(["git", "merge-tree", "--write-tree", parents[1], head],
+                           capture_output=True, text=True)
+    return (merge.returncode == 0
+            and merge.stdout.splitlines()[0] == git("rev-parse", f"{squash}^{{tree}}"))
+
+
+def revision_is_released(repository, branch, revision):
+    """Verify a particular staging revision, without relying on current labels."""
+    from staging_reset_check import merged_pull_requests, feature_release_prs, verify_release_chain
+    history = merged_pull_requests(repository)
+    for promotion in feature_release_prs(branch, history):
+        if (verify_release_chain(promotion, history)
+                and verify_promoted_pr(promotion)
+                and is_ancestor(revision, promotion["head"]["sha"])):
+            return True
+    return False

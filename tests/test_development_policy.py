@@ -54,6 +54,7 @@ class BranchPolicyTests(unittest.TestCase):
                 def paginated(endpoint):
                     return [dict(number=1, pull_request={})] if '/issues?' in endpoint else [{'sha': 'a' * 40}]
                 with patch.object(carry, 'REPO', 'choice/repo'), \
+                     patch.object(carry, 'revision_is_released', return_value=False), \
                      patch.object(carry, 'gh_api_paginated', side_effect=paginated), \
                      patch.object(carry, 'gh_api', return_value=pr):
                     self.assertEqual(carry.selected_carryover_prs()[branch]['tested_sha'], 'a' * 40)
@@ -126,6 +127,21 @@ class HookIntegrationTests(unittest.TestCase):
             result = self.pre_push(head, remote)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('DEV-220: invalid', result.stderr)
+
+    def test_real_git_push_invokes_batch_one_guard_before_updating_local_remote(self):
+        remote = self.repo / 'push-target.git'
+        self.git('init', '--bare', str(remote))
+        self.git('remote', 'add', 'origin', str(remote))
+        self.git('switch', '-c', 'chore/DEV-221')
+        self.git('commit', '--allow-empty', '-m', '[DEV-221] - Valid local push')
+        valid = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.git('push', 'origin', 'HEAD:refs/heads/chore/DEV-221')
+        self.git('-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-m', 'DEV-221: invalid')
+        result = self.git('push', 'origin', 'HEAD:refs/heads/chore/DEV-221', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Expected [ABC-123] - Description', result.stderr)
+        actual = self.git('--git-dir=' + str(remote), 'rev-parse', 'refs/heads/chore/DEV-221').stdout.strip()
+        self.assertEqual(actual, valid)
 
     def test_new_branch_and_pr_range_exclude_historical_main_titles(self):
         self.git('commit', '--allow-empty', '-m', '[DEV-220] - Valid title')
