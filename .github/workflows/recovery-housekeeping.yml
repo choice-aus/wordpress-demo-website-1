@@ -3,8 +3,17 @@ name: Recovery branch housekeeping
 on:
   workflow_dispatch:
     inputs:
+      scope:
+        description: Candidates are temporary; backup retention is a separate policy
+        type: choice
+        default: candidates
+        options: [candidates, backups, all]
+      include_legacy_candidates:
+        description: Explicitly review redundant candidates with no identifiable run; requires content preservation proof
+        type: boolean
+        default: false
       retention_days:
-        description: Minimum age in days (30 for normal operation; use 3 for demos). Latest 3 successful cycles are always retained.
+        description: Backups only; minimum age in days (30 normally, 3 for demos). Latest 3 successful cycles retained.
         type: number
         default: 30
       confirm_delete:
@@ -40,10 +49,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RETENTION_DAYS: ${{ inputs.retention_days }}
+          CLEANUP_SCOPE: ${{ inputs.scope }}
+          INCLUDE_LEGACY_CANDIDATES: ${{ inputs.include_legacy_candidates }}
         run: |
           set -euo pipefail
           python3 -u .github/scripts/recovery_retention.py assess \
-            --min-days "$RETENTION_DAYS" 2>&1 | tee retention-assessment.txt
+            --min-days "$RETENTION_DAYS" --scope "$CLEANUP_SCOPE" \
+            --include-legacy-candidates "$INCLUDE_LEGACY_CANDIDATES" 2>&1 | tee retention-assessment.txt
       - name: Report retention assessment
         if: ${{ always() }}
         run: |
