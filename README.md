@@ -40,20 +40,21 @@ Mailhog:
 | `staging` | Shared sprint integration and testing |
 | `release-*` | Temporary release branches for approved features |
 | `feature/*` | Individual development tasks |
+| `fix/*`, `hotfix/*`, `chore/*` | Fixes, urgent fixes and maintenance using the same promotion flow |
 
 ### Promotion workflow
 
-1. Create feature branches from `main`.
-2. Merge feature branches into `staging` as work progresses. Pull requests are optional.
-3. Once a feature is approved, create a pull request from `feature/*` into the current `release-*` branch.
-4. Use **Squash and merge** when merging features into a release branch.
+1. Create `feature/*`, `fix/*`, `hotfix/*` or `chore/*` branches from `main`.
+2. Merge these work branches into `staging` as work progresses. Pull requests are optional.
+3. Once a change is approved, create a pull request from its work branch into the current `release-*` branch.
+4. Use **Squash and merge** when merging work branches into a release branch.
 5. Test the completed release.
 6. Create a pull request from `release-*` into `main`.
 7. Use **Create a merge commit** when promoting a release into `main`.
 
 ### Promotion restrictions
 
-- Only `feature/*` branches may merge into `release-*`.
+- Only `feature/*`, `fix/*`, `hotfix/*` and `chore/*` branches may merge into `release-*`.
 - Only `release-*` branches may merge into `main`.
 - `staging` must never be promoted directly into `release-*` or `main`.
 - Failed or unapproved features must not be included in a release.
@@ -135,13 +136,75 @@ The tests use temporary Git repositories and mock all pushes; they do not modify
 remote branches. Preparation-only Actions runs do write candidate and backup
 branches, so running that mode still requires approval to publish those refs.
 
-## Development backlog
+## Local commit checks
 
-- Enforce commit titles early using the same `[ABC-123] - Description` rule
-  locally and in CI. Add an installable `commit-msg` hook (the message is not
-  available to a `pre-commit` hook), document setup for every checkout, and add
-  a `pre-push` check for invalid titles introduced by rebases or other tools.
-- Expose commit-title validation as a dedicated required status check for PRs
-  into staging, release branches and main. Keep the existing promotion-path
-  and PR-title checks, and test that invalid titles block both local commits
-  and PR merging. Include deliberate handling of merge and squash commits.
+Run this once in every checkout (including a separate WSL or Windows checkout):
+
+```sh
+sh scripts/install-git-hooks.sh
+```
+
+Python 3 and Git are required. The installer sets this checkout's
+`core.hooksPath` and refuses to replace a different existing hooks path.
+The `commit-msg` hook rejects titles outside `[ABC-123] - Description` before
+the commit is created. A `pre-commit` hook cannot validate the final message.
+The `pre-push` hook checks outgoing branch commits, including commits created
+by tools that skip the message hook. Fetch the remote first if its base
+objects are unavailable. First pushes of new branches exclude existing
+`origin/main` history. Git-generated merge commits are exempt; squash commits
+and PR titles must follow the title rule.
+
+Actions runs the same validator as the separate **Commit title check** on
+pushes and PRs into staging, release branches and main. Local hooks can be
+skipped, so add **Commit title check** as a required status check in those
+rulesets after the new check has run. This is a separate GitHub settings change;
+adding the workflow alone does not make the check required. Retain
+**Validate promotion path** and the other existing required checks. Commit
+titles are also still checked inside **Validate promotion path** during rollout,
+so existing required-check enforcement is preserved.
+
+## Development backlog and delivery plan
+
+Work is grouped into three batches so each item does not need its own feature
+branch. The current local feature starts with batch 1; subsequent batches can
+be reviewed independently and use new branches from main after promotion.
+
+1. **Branch and commit validation (current batch).** Support `feature/`, `fix/`,
+   `hotfix/` and `chore/` consistently in promotion, carryover, preservation and
+   cleanup. Share the commit-title rule between installed local hooks and the
+   dedicated CI check. Remaining rollout: require **Commit title check** in
+   GitHub rulesets and install hooks in each developer checkout.
+2. **Release-cycle housekeeping (next batch).**
+   - Extend exact release verification for changes already present in the
+     release base, covering the pending `release-dev-215` case without weakening
+     binary, mode or content checks. Report excluded branches and their reasons,
+     and distinguish an already deleted release from unverified release history.
+   - Resolve historical carryover/failure labels using verified later release
+     evidence; preserve the audit history and keep current unreleased changes.
+   - Handle `staging-next-cycle-*` candidates and `backup/staging-before-reset-*`
+     together with an explicit retention plan, assessment and SHA leases.
+     Preserve active and failed preparations and their recovery refs. Agree
+     retention count/age and evidence requirements before deleting older refs;
+     branch age alone is insufficient proof that a backup is disposable.
+   - After a latest-release run successfully promotes staging and deletes its
+     eligible work/release branches, optionally remove that run's temporary
+     candidate using its exact SHA. Keep preparation-only and failed-run
+     candidates. Backups follow the separate agreed retention policy.
+   - Optionally create the next `release-*` from the verified main SHA using an
+     explicit new name. Never move an existing branch or create a next release
+     during older-release cleanup. Include it in assessment and revalidation.
+3. **Keep rulesets active (investigate before configuration).** Keep staging
+   reset and release deletion restrictions enabled, granting the approved
+   closure workflow a controlled exception without installing a GitHub App.
+   Investigate a repository deploy key or a dedicated automation identity with
+   an appropriately scoped token and ruleset bypass. Confirm WordPress VIP and
+   organization policies allow the chosen credential. Split operational
+   restrictions from promotion/status-check rules so the exception need not
+   bypass ordinary PR checks. Protect credentials with the approval environment
+   and test rejected writes as well as permitted operations. GitHub supports
+   deploy-key and user/team bypass actors, but this has not been configured or
+   validated for this repository. See the [GitHub ruleset API](https://docs.github.com/en/rest/repos/rules).
+
+No automated candidate/backup retention, next-release creation, or protection
+exception is enabled by batch 1. Existing cleanup approval, backup preservation,
+leased writes and preparation-only behavior continue to apply.

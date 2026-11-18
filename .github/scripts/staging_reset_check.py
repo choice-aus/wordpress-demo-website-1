@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from development_policy import WORK_BRANCH_PREFIXES, is_work_branch
 
 
 def run(*command):
@@ -258,7 +259,7 @@ def staging_feature_branches(preserved):
 
     for _, matching_branches in preserved:
         for branch in matching_branches:
-            if branch.startswith("origin/feature/"):
+            if branch.startswith("origin/") and is_work_branch(branch.removeprefix("origin/")):
                 branches.add(branch.removeprefix("origin/"))
 
     return sorted(branches)
@@ -266,14 +267,15 @@ def staging_feature_branches(preserved):
 def check_preservation(staging_ref):
     git(
         "fetch", "origin",
-        "+refs/heads/feature/*:refs/remotes/origin/feature/*",
+        *(f"+refs/heads/{prefix}*:refs/remotes/origin/{prefix}*"
+          for prefix in WORK_BRANCH_PREFIXES),
         "--prune",
     )
 
     branches = git(
         "for-each-ref",
         "--format=%(refname:short)",
-        "refs/remotes/origin/feature/",
+        *(f"refs/remotes/origin/{prefix}" for prefix in WORK_BRANCH_PREFIXES),
     ).splitlines()
 
     commits = git(

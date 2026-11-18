@@ -10,14 +10,51 @@ on:
 
   push:
     branches:
+      - 'feature/**'
+      - 'fix/**'
+      - 'hotfix/**'
+      - 'chore/**'
       - 'release-*'
+      - main
+      - staging
+      - develop
 
 permissions:
   contents: read
 
 jobs:
+  commit-titles:
+    name: Commit title check
+    if: ${{ github.event_name != 'push' || github.event.deleted != true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Validate introduced commit titles
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == 'pull_request' ]]; then
+            python3 .github/scripts/validate_commits.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          elif [[ "$BEFORE_SHA" == '0000000000000000000000000000000000000000' ]]; then
+            python3 .github/scripts/validate_commits.py --new-branch "$HEAD_SHA" --remote origin
+          else
+            # A force push can leave the previous tip outside normal clone history.
+            if ! git cat-file -e "$BEFORE_SHA^{commit}"; then
+              git fetch --no-tags origin "$BEFORE_SHA"
+            fi
+            python3 .github/scripts/validate_commits.py --range "$BEFORE_SHA..$HEAD_SHA"
+          fi
+
   validate-source:
     name: Validate promotion path
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-22.04
 
     steps:
@@ -28,24 +65,13 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # Keep title validation in the existing required job during rollout of
+      # the new dedicated required check; both use the same validator.
       - name: Validate commit titles
-        if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
-
-          while IFS= read -r SUBJECT; do
-            if [[ ! "$SUBJECT" =~ ^\[[A-Z]{3}-[0-9]+\]\ -\ .+ ]]; then
-              echo "Invalid commit title: $SUBJECT"
-              echo "Commit titles must start with [ABC-123] - "
-              exit 1
-            fi
-            echo "Valid commit: $SUBJECT"
-          done < <(git log --no-merges --format=%s "$MERGE_BASE..$HEAD_SHA")
-
-          echo "All commit titles are valid."
+        run: python3 .github/scripts/validate_commits.py --base "$BASE_SHA" --head "$HEAD_SHA"
 
       - name: Check source and target branches
         if: github.event_name == 'pull_request'
@@ -53,36 +79,11 @@ jobs:
           SOURCE: ${{ github.head_ref }}
           TARGET: ${{ github.base_ref }}
         run: |
-          case "$TARGET" in
-            main)
-              if [[ ! "$SOURCE" =~ ^release-.+ ]]; then
-                echo "Only release-* branches may merge into main."
-                exit 1
-              fi
-              ;;
-            release-*)
-              if [[ ! "$SOURCE" =~ ^feature/.+ ]]; then
-                echo "Only feature/* branches may merge into release-*."
-                exit 1
-              fi
-              ;;
-          esac
-
-          echo "Allowed PR: $SOURCE -> $TARGET"
+          python3 .github/scripts/development_policy.py --source "$SOURCE" --target "$TARGET"
 
       - name: Validate PR title
         if: github.event_name == 'pull_request'
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
-          if [[ ! "$TITLE" =~ ^\[[A-Z]{3}-[0-9]+\]\ -\ .+ ]]; then
-            echo "PR title must start with [ABC-123] - "
-            exit 1
-          fi
-          echo "PR title format is valid."
-
-      - name: Validate release branch creation
-        if: github.event_name == 'push'
-        run: |
-          echo "Release branch push detected."
-          echo "No PR promotion validation required."
+          python3 .github/scripts/validate_commits.py --title "$TITLE"
