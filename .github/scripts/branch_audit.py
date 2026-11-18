@@ -268,15 +268,16 @@ def classify(branch, prs, completed_release, release_verified):
 
     protected_labels = labels & PROTECTED_LABELS
 
-    if protected_labels:
-        return (
-            "Keep",
-            "Protected PR label: " + ", ".join(
-                sorted(protected_labels)
-            ),
-        )
+    def protected_result(labels):
+        return "Keep", "Protected PR label: " + ", ".join(sorted(labels))
+
+    permanent_holds = protected_labels - {"carryover-next-cycle", "uat-failed-retest"}
+    if permanent_holds:
+        return protected_result(permanent_holds)
 
     if branch.startswith("release-"):
+        if protected_labels:
+            return protected_result(protected_labels)
         if branch != completed_release:
             return "Keep", "Not the explicitly completed release"
 
@@ -289,6 +290,8 @@ def classify(branch, prs, completed_release, release_verified):
         return "Cleanup candidate", "Release merged into main; closure declared"
 
     if not release_verified:
+        if protected_labels:
+            return protected_result(protected_labels)
         return "Needs review", "No verified completed release"
 
     current_sha = git("rev-parse", f"origin/{branch}")
@@ -300,10 +303,13 @@ def classify(branch, prs, completed_release, release_verified):
     ]
 
     if not release_prs:
+        if protected_labels:
+            return protected_result(protected_labels)
         return "Needs review", "No direct merged PR into completed release"
 
     from release_evidence import verify_promoted_pr
 
+    unverified_content = []
     for pr in release_prs:
         reviewed_sha = pr["head"]["sha"]
         squash_sha = pr["merge_commit_sha"]
@@ -315,11 +321,33 @@ def classify(branch, prs, completed_release, release_verified):
             continue
 
         if verify_promoted_pr(pr):
+            unresolved_labels = set()
+            for historical in branch_prs:
+                labels_on_pr = {label["name"].lower() for label in historical.get("labels", [])}
+                historical_labels = labels_on_pr & PROTECTED_LABELS
+                if not historical_labels:
+                    continue
+                resolved = (historical.get("base", {}).get("ref") == "staging"
+                            and historical.get("merged_at")
+                            and historical["merged_at"] <= pr["merged_at"]
+                            and historical["head"].get("sha")
+                            and is_ancestor(historical["head"]["sha"], reviewed_sha))
+                unresolved_labels |= historical_labels - (
+                    {"carryover-next-cycle", "uat-failed-retest"} if resolved else set())
+            if unresolved_labels:
+                return protected_result(unresolved_labels)
             return (
                 "Cleanup candidate",
                 f"PR #{pr['number']} tip verified; squash deployed to main"
+                + ("; historical UAT labels resolved by this release" if protected_labels else "")
             )
+        unverified_content.append(str(pr["number"]))
 
+    if protected_labels:
+        return protected_result(protected_labels)
+    if unverified_content:
+        return ("Needs review", "Reviewed tip matches PR(s) " + ", ".join(unverified_content)
+                + ", but deployed squash content could not be verified")
     return (
         "Needs review",
         "No release PR matches current tip with deployed squash commit"
