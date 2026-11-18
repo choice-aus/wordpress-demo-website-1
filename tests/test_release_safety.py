@@ -309,10 +309,12 @@ class CycleTests(unittest.TestCase):
         with patch.object(cycle, 'revalidate'), \
              patch.object(cycle, 'prepare', side_effect=lambda p: (events.append('prepare') or ('candidate', 'e' * 40, 'backup'))), \
              patch.object(cycle, 'reset_staging', side_effect=lambda *a: events.append('reset')), \
+             patch.object(cycle, 'promotion_receipt'), \
+             patch.object(cycle, 'remove_promoted_candidate', side_effect=lambda *a: events.append('remove_candidate')), \
              patch.object(cycle, 'cleanup', side_effect=lambda *a: events.append('cleanup')), \
              patch.object(cycle, 'finish_cycle', side_effect=lambda *a: events.append('finish')):
             cycle.execute(self.plan, False)
-        self.assertEqual(events, ['prepare', 'reset', 'cleanup', 'finish'])
+        self.assertEqual(events, ['prepare', 'reset', 'remove_candidate', 'cleanup', 'finish'])
 
     def test_ineligible_release_blocks_all_execution_before_writes(self):
         for latest in (True, False):

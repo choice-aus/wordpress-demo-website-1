@@ -25,9 +25,9 @@ on:
         type: string
         default: ''
       remove_candidate:
-        description: Remove this run's candidate only after successful staging promotion and cleanup
+        description: Remove this run's temporary candidate immediately after verified staging promotion
         type: boolean
-        default: false
+        default: true
   workflow_call:
     inputs:
       audit_mode:
@@ -47,7 +47,7 @@ on:
         default: ''
       remove_candidate:
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -140,6 +140,7 @@ jobs:
             release-cycle-plan.json
             carryover-manifest.json
             closure-receipt.json
+            promotion-receipt.json
             release-cycle-result.txt
       - name: Report outcome
         if: ${{ always() }}
