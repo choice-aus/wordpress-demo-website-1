@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 from development_policy import is_work_branch
+from release_evidence import revision_is_released
 
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "")
@@ -92,7 +93,8 @@ def selected_carryover_prs():
                 "tested_sha": tested_sha,
             }
 
-    return selected
+    return {branch: item for branch, item in selected.items()
+            if not revision_is_released(REPO, branch, item["tested_sha"])}
 
 def prepare():
     candidate = os.environ["CANDIDATE_BRANCH"]

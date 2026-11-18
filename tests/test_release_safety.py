@@ -20,6 +20,7 @@ import staging_reset_check as check
 import staging_reset_plan as plan
 import uat_carryover as carry
 import verify_next_cycle as verify
+import recovery_retention as retention
 from development_policy import WORK_BRANCH_PREFIXES
 
 
@@ -85,6 +86,74 @@ class GitEvidenceTests(unittest.TestCase):
         self.assertTrue(release_evidence.verify_promoted_pr(self.pr))
         self.assertIsNotNone(check.verify_release_chain(self.pr, [self.pr, self.release_pr]))
         self.assertTrue(branch_audit.verified_release_pr(self.release_pr, 'choice/repo', 'release-test'))
+
+    def test_already_released_binary_change_plus_new_change_verifies_exact_tree(self):
+        self.git('switch', '-c', 'split-feature', self.base)
+        Path('already.bin').write_bytes(b'\0\x01\xff')
+        self.commit('first change')
+        first = self.git('rev-parse', 'HEAD')
+        Path('new.txt').write_text('second change\n')
+        self.commit('second change')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-c', 'split-release', self.base)
+        self.git('merge', '--squash', first)
+        self.commit('first deployed separately')
+        self.git('merge', '--squash', head)
+        self.commit('remaining change deployed')
+        squash = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', squash)
+        pr = dict(self.pr, head=dict(self.pr['head'], sha=head), merge_commit_sha=squash)
+        self.assertTrue(release_evidence.verify_promoted_pr(pr))
+        Path('already.bin').write_bytes(b'\0different')
+        self.git('add', '.')
+        self.git('commit', '--amend', '--no-edit')
+        changed = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', changed)
+        self.assertFalse(release_evidence.verify_promoted_pr(dict(pr, merge_commit_sha=changed)))
+
+    def test_reconstructed_merge_conflict_is_not_accepted_as_exact_release(self):
+        self.git('switch', '-c', 'conflict-release', self.base)
+        Path('feature.txt').write_text('a different base\n')
+        self.commit('conflicting release base')
+        Path('feature.txt').write_text(self.git('show', self.head + ':feature.txt') + '\n')
+        self.commit('manually resolved squash')
+        squash = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', squash)
+        self.assertFalse(release_evidence.verify_promoted_pr(dict(self.pr, merge_commit_sha=squash)))
+
+    def test_historical_uat_labels_resolve_only_after_verified_later_release(self):
+        self.git('update-ref', 'refs/remotes/origin/feature/test', self.head)
+        historical = self.pr_data(34, 'feature/test', 'staging', self.commits[0], self.commits[0])
+        historical['merged_at'] = '2026-11-01T00:00:00Z'
+        for label in ('carryover-next-cycle', 'uat-failed-retest', 'deferred', 'rejected'):
+            historical['labels'] = [dict(name=label)]
+            result = branch_audit.classify('feature/test', [historical, self.pr], 'release-test', True)
+            self.assertEqual(result[0], 'Cleanup candidate' if label in (
+                'carryover-next-cycle', 'uat-failed-retest') else 'Keep')
+        held_release_pr = dict(self.pr, labels=[dict(name='carryover-next-cycle')])
+        self.assertEqual(branch_audit.classify('feature/test', [held_release_pr], 'release-test', True)[0], 'Keep')
+        historical['labels'] = [dict(name='carryover-next-cycle')]
+        historical['merged_at'] = '2026-12-01T00:00:00Z'
+        self.assertEqual(branch_audit.classify('feature/test', [historical, self.pr], 'release-test', True)[0], 'Keep')
+
+    def test_only_deployed_staging_revision_is_excluded_from_carryover(self):
+        self.git('switch', 'feature')
+        Path('extra.txt').write_text('unreleased\n')
+        self.commit('unreleased follow-up')
+        extra = self.git('rev-parse', 'HEAD')
+        with patch.object(check, 'merged_pull_requests', return_value=[self.pr, self.release_pr]):
+            self.assertTrue(release_evidence.revision_is_released('choice/repo', 'feature/test', self.head))
+            self.assertFalse(release_evidence.revision_is_released('choice/repo', 'feature/test', extra))
+
+    def test_retention_proof_accepts_released_originals_but_not_unreleased_followup(self):
+        with patch.object(retention, 'merged_pull_requests', return_value=[self.pr, self.release_pr]), \
+             patch.object(check, 'github_paginated', return_value=[{'sha': c} for c in self.commits]):
+            preserved = retention.preservation_checker('choice/repo', self.main, self.main)
+            self.assertTrue(preserved(self.head))
+            self.git('switch', 'feature')
+            Path('unreleased.txt').write_text('sole surviving recovery content\n')
+            self.commit('unreleased follow-up')
+            self.assertFalse(preserved(self.git('rev-parse', 'HEAD')))
 
     def test_partial_squash_is_rejected(self):
         self.git('switch', '-c', 'partial', self.base)
@@ -212,6 +281,8 @@ class CycleTests(unittest.TestCase):
         self.plan = dict(repository='choice/repo', release='release-new', latest='release-new',
                          prepare=True, main='a' * 40, staging='b' * 40,
                          release_sha='c' * 40, cleanup={'release-new': 'c' * 40, 'feature/new': 'd' * 40})
+        self.plan['assessments'] = [dict(branch=branch, sha=sha, status='Cleanup candidate', reason='Verified')
+                                    for branch, sha in self.plan['cleanup'].items()]
 
     def test_older_release_never_prepares_or_resets(self):
         older = dict(self.plan, release='release-old', prepare=False)
@@ -238,9 +309,10 @@ class CycleTests(unittest.TestCase):
         with patch.object(cycle, 'revalidate'), \
              patch.object(cycle, 'prepare', side_effect=lambda p: (events.append('prepare') or ('candidate', 'e' * 40, 'backup'))), \
              patch.object(cycle, 'reset_staging', side_effect=lambda *a: events.append('reset')), \
-             patch.object(cycle, 'cleanup', side_effect=lambda *a: events.append('cleanup')):
+             patch.object(cycle, 'cleanup', side_effect=lambda *a: events.append('cleanup')), \
+             patch.object(cycle, 'finish_cycle', side_effect=lambda *a: events.append('finish')):
             cycle.execute(self.plan, False)
-        self.assertEqual(events, ['prepare', 'reset', 'cleanup'])
+        self.assertEqual(events, ['prepare', 'reset', 'cleanup', 'finish'])
 
     def test_ineligible_release_blocks_all_execution_before_writes(self):
         for latest in (True, False):
@@ -281,7 +353,7 @@ class CycleTests(unittest.TestCase):
             cleanup.assert_not_called()
 
     def test_release_becoming_ineligible_during_preparation_blocks_candidate_creation(self):
-        eligible = [dict(branch=branch, sha=sha, status='Cleanup candidate')
+        eligible = [dict(branch=branch, sha=sha, status='Cleanup candidate', reason='Verified')
                     for branch, sha in self.plan['cleanup'].items()]
         blocked = [dict(branch='release-new', sha='c' * 40,
                         status='Keep', reason='Protected PR label: deferred')]
@@ -349,8 +421,8 @@ class CycleTests(unittest.TestCase):
     def test_snapshot_marks_older_release_cleanup_only(self):
         with patch.object(cycle, 'get_latest_release', return_value='release-new'), \
              patch.object(cycle, 'get_cleanup_candidates', return_value=(True, [
-                 dict(branch='release-old', sha='c' * 40, status='Cleanup candidate'),
-                 dict(branch='feature/DEV-212', sha='d' * 40, status='Keep'),
+                 dict(branch='release-old', sha='c' * 40, status='Cleanup candidate', reason='Verified'),
+                 dict(branch='feature/DEV-212', sha='d' * 40, status='Keep', reason='Unreleased'),
              ])), patch.object(cycle, 'git', return_value='a' * 40):
             result = cycle.snapshot('choice/repo', 'release-old')
         self.assertFalse(result['prepare'])
@@ -380,6 +452,7 @@ class CarryoverSelectionTests(unittest.TestCase):
                 return [dict(number=n, pull_request={}) for n in (20, 10)]
             return [{'sha': 'a' * 40}]
         with patch.object(carry, 'REPO', 'choice/repo'), \
+             patch.object(carry, 'revision_is_released', return_value=False), \
              patch.object(carry, 'gh_api_paginated', side_effect=paginated), \
              patch.object(carry, 'gh_api', side_effect=[old, new]):
             self.assertEqual(carry.selected_carryover_prs()['feature/test']['number'], 10)

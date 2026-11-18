@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 from branch_audit import get_cleanup_candidates, get_latest_release, git, github
 from delete_branch import verify_remote_repository
@@ -27,17 +28,20 @@ def approval_environment(repository):
             "branch-cleanup must have required reviewers configured")
 
 
-def snapshot(repository, release):
+def snapshot(repository, release, options=None):
     latest = get_latest_release(repository)
     verified, assessments = get_cleanup_candidates(repository, release)
+    release_assessment = next((item for item in assessments if item["branch"] == release), {})
+    require(release_assessment.get("sha"),
+            f"Completed release branch {release!r} is already deleted or unavailable; "
+            "select an existing completed release")
     require(verified, "Completed release is not verified in main")
     cleanup = {item["branch"]: item["sha"] for item in assessments
                if item["status"] == "Cleanup candidate"}
-    release_assessment = next((item for item in assessments if item["branch"] == release), {})
     require(release in cleanup,
             "Completed release is not cleanup eligible: "
             + release_assessment.get("reason", "No eligible release assessment"))
-    return {
+    result = {
         "repository": repository,
         "release": release,
         "latest": latest,
@@ -46,11 +50,22 @@ def snapshot(repository, release):
         "staging": git("rev-parse", "origin/staging"),
         "release_sha": git("rev-parse", f"origin/{release}"),
         "cleanup": cleanup,
+        "assessments": [{key: item[key] for key in ("branch", "sha", "status", "reason")}
+                        for item in assessments],
     }
+    if options is not None:
+        require(release == latest or not any(options.values()),
+                "Older-release cleanup cannot create a next release or remove a cycle candidate")
+        if options.get("next_release"):
+            validate_next_release(options["next_release"], release)
+            require(not matching_refs(repository, options["next_release"]),
+                    "Next release branch already exists; choose a new name")
+        result["options"] = options
+    return result
 
 
 def revalidate(plan, staging=None):
-    current = snapshot(plan["repository"], plan["release"])
+    current = snapshot(plan["repository"], plan["release"], plan.get("options"))
     expected = dict(plan)
     if staging:
         expected["staging"] = staging
@@ -63,10 +78,21 @@ def remote_sha(repository, branch):
     return github("api", f"repos/{repository}/git/ref/heads/{branch}")["object"]["sha"]
 
 
+def matching_refs(repository, branch):
+    refs = github("api", f"repos/{repository}/git/matching-refs/heads/{branch}")
+    return [ref for ref in refs if ref["ref"] == f"refs/heads/{branch}"]
+
+
+def validate_next_release(branch, completed_release):
+    require(branch.startswith("release-") and len(branch) > len("release-") and branch != completed_release,
+            "Next release must be a new release-* branch")
+    require(subprocess.run(["git", "check-ref-format", "--branch", branch],
+                           capture_output=True).returncode == 0, "Invalid next release branch name")
+
+
 def create_or_verify(repository, branch, sha):
     # A failed read is not evidence of absence (auth/network errors must abort).
-    refs = github("api", f"repos/{repository}/git/matching-refs/heads/{branch}")
-    matches = [ref for ref in refs if ref["ref"] == f"refs/heads/{branch}"]
+    matches = matching_refs(repository, branch)
     if matches:
         require(matches[0]["object"]["sha"] == sha, f"Unexpected existing SHA: {branch}")
     else:
@@ -130,6 +156,41 @@ def cleanup(plan, staging=None):
     print("Deleted verified branches: " + ", ".join(sorted(plan["cleanup"])))
 
 
+def finish_cycle(plan, candidate, candidate_sha, backup):
+    """Only after promotion and cleanup succeed, perform reviewed follow-up work."""
+    repository = plan["repository"]
+    options = plan.get("options", {})
+    require(get_latest_release(repository) == plan["release"], "Latest release changed after cleanup")
+    require(remote_sha(repository, "main") == plan["main"], "Main changed after cleanup")
+    require(remote_sha(repository, "staging") == candidate_sha, "Staging changed after cleanup")
+    require(remote_sha(repository, backup) == plan["staging"], "Backup changed after cleanup")
+    require(remote_sha(repository, candidate) == candidate_sha, "Candidate changed after cleanup")
+    approval_environment(repository)
+    verify_remote_repository(repository)
+    next_release = options.get("next_release", "")
+    if next_release:
+        validate_next_release(next_release, plan["release"])
+        require(not matching_refs(repository, next_release), "Next release branch already exists")
+        # POST is create-only: a concurrent creation rejects this operation.
+        github("api", f"repos/{repository}/git/refs", "--method", "POST",
+               "-f", f"ref=refs/heads/{next_release}", "-f", f"sha={plan['main']}")
+        print(f"Created next release {next_release} from main at {plan['main']}")
+    removed = bool(options.get("remove_candidate"))
+    if removed:
+        # Staging retains the exact verified candidate commit; keep the backup.
+        require(remote_sha(repository, "staging") == candidate_sha, "Staging changed before candidate removal")
+        git("push", f"--force-with-lease=refs/heads/{candidate}:{candidate_sha}",
+            "origin", f":refs/heads/{candidate}")
+        print(f"Removed successful-cycle candidate {candidate}; staging and backup retained")
+    receipt = dict(schema=1, repository=repository, release=plan["release"], main=plan["main"],
+                   original_staging=plan["staging"], candidate=candidate, candidate_sha=candidate_sha,
+                   backup=backup, backup_sha=plan["staging"], candidate_removed=removed,
+                   next_release=next_release, run_id=os.environ["GITHUB_RUN_ID"],
+                   run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
+                   completed_at=datetime.now(timezone.utc).isoformat())
+    Path("closure-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+
+
 def execute(plan, preparation_only=True):
     revalidate(plan)
     promoted = None
@@ -144,6 +205,8 @@ def execute(plan, preparation_only=True):
         print("Preparation only: staging reset and branch deletion disabled")
         return
     cleanup(plan, promoted)
+    if promoted:
+        finish_cycle(plan, candidate, sha, backup)
 
 
 def main():
@@ -153,6 +216,8 @@ def main():
     parser.add_argument("--audit-mode", choices=("latest", "specific"), default="latest")
     parser.add_argument("--completed-release", default="")
     parser.add_argument("--preparation-only", choices=("true", "false"), default="true")
+    parser.add_argument("--next-release", default="")
+    parser.add_argument("--remove-candidate", choices=("true", "false"), default="false")
     args = parser.parse_args()
     repository = os.environ["GITHUB_REPOSITORY"]
     if args.action == "assess":
@@ -161,12 +226,16 @@ def main():
                 "completed_release is only valid in specific mode")
         release = args.completed_release if args.audit_mode == "specific" else get_latest_release(repository)
         require(release.startswith("release-"), "A release-* branch is required")
-        plan = snapshot(repository, release)
+        options = dict(next_release=args.next_release, remove_candidate=args.remove_candidate == "true")
+        plan = snapshot(repository, release, options)
         if plan["prepare"]:
             check_preparation_safety(plan)
         Path(args.plan).write_text(json.dumps(plan, indent=2) + "\n")
         print("Review this snapshot before approving branch-cleanup:\n")
         print(json.dumps(plan, indent=2))
+        print("\nBranch assessments (including exclusions):")
+        for item in plan["assessments"]:
+            print(f"- {item['branch']}: {item['status']} — {item['reason']}")
     else:
         plan = json.loads(Path(args.plan).read_text())
         require(plan["repository"] == repository, "Plan repository mismatch")
@@ -177,4 +246,7 @@ if __name__ == "__main__":
     try:
         main()
     except (RuntimeError, subprocess.CalledProcessError) as error:
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                summary.write(f"\n**BLOCKED:** {error}\n")
         sys.exit(f"BLOCKED: {error}")

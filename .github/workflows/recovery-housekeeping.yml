@@ -1,0 +1,100 @@
+name: Recovery branch housekeeping
+
+on:
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: Minimum age in days (30 for normal operation; use 3 for demos). Latest 3 successful cycles are always retained.
+        type: number
+        default: 30
+      confirm_delete:
+        description: Delete only recovery refs listed in the reviewed retention assessment
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: read
+
+# Never prune recovery evidence while a closure/preparation is running.
+concurrency:
+  group: close-release-cycle
+  cancel-in-progress: false
+
+jobs:
+  assessment:
+    name: Assess recovery branch retention
+    runs-on: ubuntu-latest
+    outputs:
+      plan_artifact_name: recovery-retention-plan-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Test release safety and retention controls
+        run: python3 -m unittest discover -s tests -v
+      - name: Assess recovery refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RETENTION_DAYS: ${{ inputs.retention_days }}
+        run: |
+          set -euo pipefail
+          python3 -u .github/scripts/recovery_retention.py assess \
+            --min-days "$RETENTION_DAYS" 2>&1 | tee retention-assessment.txt
+      - name: Report retention assessment
+        if: ${{ always() }}
+        run: |
+          if [[ -f retention-assessment.txt ]]; then
+            cat retention-assessment.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: recovery-retention-plan-${{ github.run_attempt }}
+          path: |
+            retention-plan.json
+            retention-assessment.txt
+          if-no-files-found: error
+
+  execute:
+    name: Approved recovery branch deletion
+    needs: assessment
+    if: ${{ inputs.confirm_delete == true }}
+    runs-on: ubuntu-latest
+    environment: branch-cleanup
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.assessment.outputs.plan_artifact_name }}
+      - name: Revalidate and prune approved recovery refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -u .github/scripts/recovery_retention.py execute 2>&1 | tee retention-result.txt
+      - name: Preserve retention evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-retention-result-${{ github.run_attempt }}
+          path: |
+            retention-plan.json
+            retention-result.txt
+      - name: Report outcome
+        if: ${{ always() }}
+        run: |
+          if [[ -f retention-result.txt ]]; then
+            cat retention-result.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
