@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from development_policy import is_work_branch
 
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "")
@@ -65,7 +66,7 @@ def selected_carryover_prs():
         if (
             not pr["head"].get("repo")
             or pr["head"]["repo"]["full_name"] != REPO
-            or not pr["head"]["ref"].startswith("feature/")
+            or not is_work_branch(pr["head"]["ref"])
         ):
             continue
         branch = pr["head"]["ref"]

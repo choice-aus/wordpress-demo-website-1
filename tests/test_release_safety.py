@@ -20,6 +20,7 @@ import staging_reset_check as check
 import staging_reset_plan as plan
 import uat_carryover as carry
 import verify_next_cycle as verify
+from development_policy import WORK_BRANCH_PREFIXES
 
 
 class CommandDiagnosticsTests(unittest.TestCase):
@@ -135,6 +136,16 @@ class GitEvidenceTests(unittest.TestCase):
         self.git('update-ref', 'refs/remotes/origin/feature/test', self.git('rev-parse', 'HEAD'))
         self.assertEqual(branch_audit.classify('feature/test', [self.pr], 'release-test', True)[0],
                          'Needs review')
+
+    def test_all_work_branch_types_have_verified_release_accounting(self):
+        for prefix in WORK_BRANCH_PREFIXES:
+            with self.subTest(prefix=prefix):
+                pr = copy.deepcopy(self.pr)
+                pr['head']['ref'] = prefix + 'test'
+                prs = [pr, self.release_pr]
+                with patch.object(check, 'github_paginated', return_value=[{'sha': c} for c in self.commits]):
+                    released = plan.released_feature_commits('choice/repo', prs)
+                self.assertEqual(set(released), set(self.commits))
 
     def test_binary_and_mode_changes_are_verified_exactly(self):
         self.git('switch', '-c', 'binary-feature', self.base)
