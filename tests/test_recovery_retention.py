@@ -38,16 +38,16 @@ class RetentionTests(unittest.TestCase):
             cycles.append(cycle)
         proof = Mock(return_value=preserved)
         plan = retention.build_plan('choice/repo', refs, cycles, set(protected),
-                                    self.now.isoformat(), proof)
+                                    self.now.isoformat(), proof, scope='backups')
         return plan, cycles, proof
 
     def test_keeps_latest_three_cycles_and_only_prunes_proven_older_refs(self):
         plan, cycles, proof = self.case()
-        expected = {cycle[kind] for cycle in cycles[3:] for kind in ('backup', 'candidate')}
+        expected = {cycle['backup'] for cycle in cycles[3:]}
         self.assertEqual(set(plan['cleanup']), expected)
         self.assertNotIn('main', plan['cleanup'])
         self.assertNotIn('staging', plan['cleanup'])
-        self.assertEqual(proof.call_count, 4)
+        self.assertEqual(proof.call_count, 2)
 
     def test_thirty_day_minimum_overrides_cycle_count(self):
         plan, _, proof = self.case(ages=(1, 2, 3, 10))
@@ -72,7 +72,7 @@ class RetentionTests(unittest.TestCase):
     def test_changed_ref_is_not_pruned_using_old_receipt(self):
         initial, cycles, _ = self.case()
         refs = dict(initial['refs'])
-        changed = cycles[-1]['candidate']
+        changed = cycles[-1]['backup']
         refs[changed] = 'f' * 40
         plan = retention.build_plan('choice/repo', refs, cycles, set(),
                                     self.now.isoformat(), lambda sha: True)
@@ -90,7 +90,7 @@ class RetentionTests(unittest.TestCase):
         demo = retention.build_plan('choice/repo', normal['refs'], cycles, set(), self.now.isoformat(),
                                     lambda sha: True, min_days=3)
         self.assertEqual(demo['min_days'], 3)
-        self.assertEqual(set(demo['cleanup']), {cycles[-1]['backup'], cycles[-1]['candidate']})
+        self.assertEqual(set(demo['cleanup']), {cycles[-1]['backup']})
         self.assertTrue(all(cycle['backup'] not in demo['cleanup'] and cycle['candidate'] not in demo['cleanup']
                             for cycle in cycles[:3]))
 
@@ -111,7 +111,7 @@ class RetentionTests(unittest.TestCase):
              patch.object(retention, 'verify_remote_repository'), \
              patch.object(retention.subprocess, 'run') as run:
             retention.execute(demo)
-            assess.assert_called_once_with('choice/repo', demo['assessed_at'], 3, 3)
+            assess.assert_called_once_with('choice/repo', demo['assessed_at'], 3, 3, 'all', False)
             self.assertIn('--atomic', run.call_args.args[0])
 
     def test_changed_snapshot_blocks_all_deletion(self):
@@ -211,7 +211,8 @@ class LeasedRetentionIntegrationTests(unittest.TestCase):
         self.branches = ['staging-next-cycle-1-1', 'backup/staging-before-reset-' + self.sha[:12]]
         for branch in self.branches:
             self.git('--git-dir=' + self.remote, 'update-ref', 'refs/heads/' + branch, self.sha)
-        self.plan = dict(repository='choice/repo', assessed_at='2026-11-18T00:00:00+00:00',
+        self.plan = dict(schema=2, repository='choice/repo', assessed_at='2026-11-18T00:00:00+00:00',
+                         scope='all', include_legacy_candidates=False,
                          keep_cycles=3, min_days=30, cleanup={branch: self.sha for branch in self.branches})
 
     def git(self, *args):
