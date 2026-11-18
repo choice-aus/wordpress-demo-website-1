@@ -6,6 +6,7 @@ import os
 import subprocess
 
 from release_evidence import verify_promoted_pr
+from development_policy import is_work_branch
 
 from staging_reset_check import (
     git,
@@ -175,7 +176,7 @@ def staging_feature_commits(repository, merged_prs):
     staging_prs = [
         pr for pr in merged_prs
         if pr.get("base", {}).get("ref") == "staging"
-        and pr.get("head", {}).get("ref", "").startswith("feature/")
+        and is_work_branch(pr.get("head", {}).get("ref", ""))
     ]
 
     commits_to_prs = {}
@@ -210,7 +211,7 @@ def released_feature_commits(repository, merged_prs):
     feature_branches = {
         pr["head"]["ref"]
         for pr in merged_prs
-        if pr.get("head", {}).get("ref", "").startswith("feature/")
+        if is_work_branch(pr.get("head", {}).get("ref", ""))
     }
 
     for branch in sorted(feature_branches):

@@ -7,6 +7,7 @@ import subprocess
 import sys
 from branch_audit import get_cleanup_candidates, run
 from urllib.parse import urlparse
+from development_policy import is_work_branch
 
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
@@ -100,9 +101,9 @@ def main():
     branch = args.branch
     expected_sha = args.expected_sha.lower()
 
-    # Only feature and release branches are eligible.
+    # Only supported work branches and release branches are eligible.
     if not (
-        branch.startswith("feature/")
+        is_work_branch(branch)
         or branch.startswith("release-")
     ):
         sys.exit(f"REFUSED: Branch type not eligible: {branch}")

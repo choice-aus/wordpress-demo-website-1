@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timezone
+from development_policy import is_work_branch
 
 PROTECTED_LABELS = {
     "uat-failed-retest",
@@ -48,7 +49,9 @@ def get_branches():
     return sorted(
         branch.removeprefix("origin/")
         for branch in output.splitlines()
-        if branch.startswith(("origin/feature/", "origin/release-"))
+        if branch.startswith("origin/") and (
+            is_work_branch(branch.removeprefix("origin/"))
+            or branch.startswith("origin/release-"))
     )
 
 
