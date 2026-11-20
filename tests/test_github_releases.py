@@ -160,8 +160,6 @@ class PublicationTests(unittest.TestCase):
         endpoint = args[1]
         if '/git/matching-refs/' in endpoint:
             return [dict(ref='refs/tags/v1.0.1', object=dict(type='commit', sha=SHA))]
-        if endpoint.endswith('/generate-notes'):
-            return dict(body='Generated release notes')
         if endpoint.endswith('/git/ref/heads/main'):
             return dict(object=dict(sha=self.main))
         if endpoint.endswith('/releases'):
@@ -174,6 +172,7 @@ class PublicationTests(unittest.TestCase):
              patch.object(publisher, 'pages', return_value=[]), \
              patch.object(publisher, 'version_tags', return_value=[]), \
              patch.object(publisher, 'reserve_version', return_value=reserved()), \
+             patch.object(publisher, 'build_release_notes', return_value='VIP deployment is not asserted'), \
              patch.object(publisher, 'github', side_effect=self.api) as api:
             result = publisher.publish(REPO, SHA)
         self.assertEqual(result['status'], 'published')
@@ -188,6 +187,7 @@ class PublicationTests(unittest.TestCase):
              patch.object(publisher, 'pages', return_value=[]), \
              patch.object(publisher, 'version_tags', return_value=[]), \
              patch.object(publisher, 'reserve_version', return_value=reserved()), \
+             patch.object(publisher, 'build_release_notes', return_value='Clean release notes'), \
              patch.object(publisher, 'github', side_effect=self.api) as api:
             publisher.publish(REPO, SHA)
         self.assertIn('make_latest=false', api.call_args_list[-1].args)

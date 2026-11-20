@@ -11,6 +11,7 @@ import sys
 
 from branch_audit import git, github, is_ancestor
 from release_cycle import require
+from release_notes import build_release_notes
 
 VERSION = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 AUTOMATION = "wordpress-source-release-v1"
@@ -158,12 +159,7 @@ def publish(repository, sha):
     exact = [ref for ref in refs if ref["ref"] == f"refs/tags/{tag['name']}"]
     require(len(exact) == 1 and tag_info(repository, exact[0])["sha"] == sha,
             "Reserved tag changed before publication; no release published")
-    notes = github("api", f"repos/{repository}/releases/generate-notes", "--method", "POST",
-                   "-f", f"tag_name={tag['name']}", "-f", f"target_commitish={sha}",
-                   "-f", f"previous_tag_name={tag['metadata']['previous_tag']}")
-    body = (f"Source release from PR #{pr['number']} (`{pr['head']['ref']}` → `main`).\n"
-            f"Commit: `{sha}`. Main CI passed for this SHA. VIP deployment is not asserted by this release.\n\n"
-            + notes["body"])
+    body = build_release_notes(repository, sha, pr["head"]["ref"], tag["name"], tags, releases)
     current_main = github("api", f"repos/{repository}/git/ref/heads/main")["object"]["sha"]
     # CI for an older merge can finish after a newer merge's CI. Publish its
     # exact source snapshot, but never deliberately promote it over current main.
