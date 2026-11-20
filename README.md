@@ -67,6 +67,110 @@ Mailhog:
 | `release-*` | Squash and merge |
 | `main` | Merge commit |
 
+## Creating a release branch independently
+
+Run **Create release branch** from `main` and provide its single input,
+`release_branch` (for example `release-dev-224`). The workflow creates that name
+from the exact current main SHA and records the result in its summary and
+`release-branch-creation.json` artifact. It does not move an existing branch,
+publish a GitHub Release, reset staging, clean up refs or change VIP settings.
+It shares the closure/housekeeping concurrency lock. A changed main SHA or a
+concurrently created name stops creation; a retry never overwrites existing work.
+`release-dev-223` already exists for DEV-223 and does not need to be recreated.
+
+If you use this standalone workflow to pre-create the next release, leave
+`next_release` blank when running **Branch cleanup**. That input is for creating
+a new branch after closure; it intentionally rejects an already existing name.
+Branches created with `GITHUB_TOKEN` do not automatically start other Actions
+workflows through ordinary push/create events. This workflow does not claim a
+deployment; VIP branch switching/deployment is a separate operation.
+
+## Automated GitHub source releases
+
+**Publish GitHub source release** runs after successful `CI` for a push to
+`main`. It accepts only a verified, two-parent `release-*` PR merge into main,
+checks CI for that exact merge SHA, and tags that SHA even if main has advanced.
+Feature/PR CI, failed main CI and ordinary direct pushes cannot publish a release.
+History before this workflow was introduced is not automatically backfilled.
+
+Stable tags follow the existing `v1.0.0` convention. Each new release increments
+patch by default (`v1.0.0` → `v1.0.1`). On the **release-to-main PR**, optionally
+use one of `release:minor`, `release:major` or `release:patch`. Minor resets patch;
+major resets minor and patch. Conflicting bump labels stop publication. Labels
+on individual feature PRs do not select the release version.
+
+The workflow creates annotated tags with PR/SHA/version metadata and generated
+release notes. Existing tags and published releases are never moved or edited.
+A successful retry is a no-op; a failure after tag reservation can resume that
+same version. Different merge SHAs use separate concurrency groups and atomic
+create-only tag allocation with collision retries, so pending releases are not
+silently displaced by a global single-pending-run queue. Versions are allocated
+in reservation order; CI completion/publication order can differ from merge order.
+Publication of an older SHA does not deliberately replace the latest release
+when main has advanced. GitHub refs and Releases are separate API operations;
+failures can leave a reserved tag awaiting publication. Never repoint that tag
+to recover from a failure.
+
+For an explicit retry, run the workflow from `main` with `merge_sha` set to the
+original full release-to-main merge SHA; all eligibility and CI checks still
+apply. No typing of a version is required. The existing `v1.0.0` release is
+preserved, and the first new patch version is based on the highest stable
+SemVer tag present when allocation runs. Tags created by this workflow must
+remain immutable by team policy and the eventual tag-protection configuration.
+
+This is independent of **Branch cleanup**: old-release cleanup and reruns must
+not create retrospective releases or control whether publication happens.
+The current deploy workflow only prints `Would deploy`; it is not a real VIP
+deployment confirmation. Therefore these are explicitly **source releases**,
+not assertions that production has deployed. If publication should mean
+"deployed to production", later gate this same publisher on a verified VIP
+deployment of the exact source/build SHA. GitHub supports merged-PR and
+deployment-status events, but the real VIP signal still needs to be selected.
+See [GitHub workflow events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
+and [GitHub Releases and tags](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
+
+Merging DEV-223 into main enables this automatic publishing path after its main
+push CI passes. The first live tag/release publication still needs operational
+validation; local tests mock GitHub writes. `GITHUB_TOKEN` release/tag writes do
+not themselves start ordinary downstream Actions event workflows, so future
+deployment chaining must be explicit rather than relying on that side effect.
+
+## VIP deployment branches and release environments
+
+VIP Default Deployment tracks a specific branch in the application's configured
+wpcomvip repository. Updating that configured branch in the Dashboard requires
+the branch to exist, and **Change Branch and Deploy** starts a deployment.
+See [VIP deploying-branch updates](https://docs.wpvip.com/code-deployment/default-deployment/deploying-branches/update/).
+
+For an optional VIP environment that tracks a rotating `release-*` branch, use
+this sequence once the old release has reached main:
+
+1. Create the next release branch from main with **Create release branch**.
+2. In the VIP Dashboard, point that environment to the new existing branch.
+3. Confirm its deployment succeeds and the old branch is no longer configured.
+4. Run **Branch cleanup** for the old release, leaving `next_release` blank.
+
+Do not rely on unspecified VIP behavior after deleting a configured deploying
+branch. This repo does not read or change VIP environment mappings, so the
+operator must verify them before approving deletion. Creating the next branch
+only inside the cleanup workflow is too late for this handoff: cleanup deletes
+the old release before its optional next-branch creation step.
+
+Production and shared UAT can retain stable `main` and `staging` mappings, if
+those are the branches configured for the actual VIP application. A hosted
+release environment is optional and remains a team cost/configuration decision.
+If none is hosted, the branch workflow still prepares the next release and no
+release-environment handoff is needed. If a release slot is hosted, also consider
+a stable deployment branch for it, with explicit controlled promotion, instead
+of repeatedly rebinding the environment to disposable branches.
+
+Before applying this plan on VIP, confirm the actual source repository (this
+demo repository versus a wpcomvip mirror), environment mappings and whether a
+CI/CD-built branch is used. VIP reserves the `*-built` suffix for build/deploy
+flows; source release branches and deployment branches need not be identical.
+See [VIP build and deploy](https://docs.wpvip.com/code-deployment/default-deployment/build-and-deploy/).
+No VIP integration or automatic mapping validation is enabled by DEV-223.
+
 ## UAT Demonstration
 
 This change is used to demonstrate the handling of a feature that fails UAT and must be carried forward into a future staging cycle.
@@ -267,36 +371,30 @@ adding the workflow alone does not make the check required. Retain
 titles are also still checked inside **Validate promotion path** during rollout,
 so existing required-check enforcement is preserved.
 
-## Development backlog and delivery plan
+## Outstanding backlog
 
-Work is grouped into three batches so each item does not need its own feature
-branch. Ticket branches use `feature/DEV-123` (or an approved work-branch prefix)
-without a descriptive suffix and start from current main.
+Completed DEV-220–222 implementation items have been removed from this backlog;
+their operating instructions remain above. New ticket branches use
+`feature/DEV-123` (or an approved work-branch prefix) and start from current main.
 
-1. **Branch and commit validation (DEV-220, released).** Support `feature/`, `fix/`,
-   `hotfix/` and `chore/` consistently in promotion, carryover, preservation and
-   cleanup. Share the commit-title rule between installed local hooks and the
-   dedicated CI check. Remaining rollout: require **Commit title check** in
-   GitHub rulesets and install hooks in each developer checkout.
-2. **Release-cycle housekeeping (DEV-221 in main; DEV-222 lifecycle refinement under review).**
-   - Extend exact release verification for changes already present in the
-     release base, covering the pending `release-dev-215` case without weakening
-     binary, mode or content checks. Report excluded branches and their reasons,
-     and distinguish an already deleted release from unverified release history.
-   - Resolve historical carryover/failure labels using verified later release
-     evidence; preserve the audit history and keep current unreleased changes.
-   - Separate short-lived candidates from backups. Retire promoted candidates
-     by default immediately after verified promotion, independently of later
-     release cleanup, and retain promotion evidence in artifacts. Review old,
-     safely superseded candidates in candidate-only housekeeping without age or
-     cycle-count retention; protect active runs, open PRs and unique changes.
-   - Keep backup retention at 3 successful cycles and 30 days normally; demos
-     can set `retention_days=3`. Require full-success evidence and current
-     content-preservation proof. Preserve failed/active recovery backups.
-   - Optionally create the next `release-*` from the verified main SHA using an
-     explicit new name. Never move an existing branch or create a next release
-     during older-release cleanup. Include it in assessment and revalidation.
-3. **Keep rulesets active (investigate before configuration).** Keep staging
+- **Refine backup retirement.** Keep the latest three successful cycles and all
+  backups younger than the selected duration. Treat active use, unique content
+  and changed SHAs as deletion safeguards. A resolved historical failure should
+  not protect a backup forever. Add an explicitly reviewed legacy-adoption path
+  for missing/expired provenance and record reliable creation/use timestamps;
+  Git commit dates are not backup-creation dates. Preserve approval, content
+  proof and exact SHA leases. The three early demo backups were manually
+  reviewed and removed; the general policy refinement is not implemented here.
+- **Validate release automation rollout (DEV-223).** Test the new main-CI
+  publisher, patch/minor/major labels, duplicate/retry behavior and immutable
+  tag targets in Actions. Validate standalone branch creation and rejection of
+  an existing name. Keep GitHub source publication separate from housekeeping.
+- **Choose the VIP deployment model.** Decide whether to fund/configure a hosted
+  release slot. Confirm source/build branch mappings and select a production
+  deployment-completion signal before making published releases mean deployed
+  releases. Establish a reliable guard or operating control against deleting
+  any branch still configured on VIP; today that verification is manual.
+- **Keep rulesets active.** Keep staging
    reset and release deletion restrictions enabled, granting the approved
    closure workflow a controlled exception without installing a GitHub App.
    Investigate a repository deploy key or a dedicated automation identity with
@@ -307,7 +405,6 @@ without a descriptive suffix and start from current main.
    and test rejected writes as well as permitted operations. GitHub supports
    deploy-key and user/team bypass actors, but this has not been configured or
    validated for this repository. See the [GitHub ruleset API](https://docs.github.com/en/rest/repos/rules).
-
-Batch 2 follow-up writes are opt-in and housekeeping remains a separate approved
-action. Batch 3 protection exceptions have not been configured. Existing approval,
-leased writes and preparation-only restrictions continue to apply.
+- **Check real-environment rollout.** Verify required checks on the intended VIP
+  repository and install local hooks in each developer checkout. The validator
+  implementation is complete; account/ruleset configuration is a separate task.
