@@ -1,0 +1,45 @@
+name: Create release branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: New release-* branch name to create from current main
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Coordinate with closure and recovery housekeeping; never cancel their writes.
+concurrency:
+  group: close-release-cycle
+  cancel-in-progress: false
+
+jobs:
+  create:
+    name: Create named branch from main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require reviewed workflow from main
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          if [[ "$WORKFLOW_REF" != 'refs/heads/main' ]]; then
+            echo 'Run Create release branch from main.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Create release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+        run: python3 .github/scripts/create_release_branch.py "$RELEASE_BRANCH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-branch-creation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-branch-creation.json
+          if-no-files-found: error

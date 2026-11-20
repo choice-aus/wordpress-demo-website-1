@@ -1,0 +1,59 @@
+name: Publish GitHub source release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      merge_sha:
+        description: Exact release-to-main merge SHA to retry; its main push CI must have passed
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: read
+
+# Per-SHA serialization avoids duplicate publications without dropping unrelated
+# merged releases from GitHub's single-pending-run concurrency queue. Tag refs
+# are allocated create-only with collision retries across different SHAs.
+concurrency:
+  group: github-source-release-${{ github.event.workflow_run.head_sha || inputs.merge_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require reviewed workflow from main
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          if [[ "$WORKFLOW_REF" != 'refs/heads/main' ]]; then
+            echo 'Run release publication from main.' >&2
+            exit 1
+          fi
+      # Always execute trusted current main, never a CI artifact or PR head.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish verified source release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ github.event.workflow_run.head_sha || inputs.merge_sha }}
+        run: python3 .github/scripts/publish_github_release.py "$MERGE_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: github-release-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: github-release-result.json
+          if-no-files-found: error
