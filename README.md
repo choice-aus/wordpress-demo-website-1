@@ -99,8 +99,18 @@ use one of `release:minor`, `release:major` or `release:patch`. Minor resets pat
 major resets minor and patch. Conflicting bump labels stop publication. Labels
 on individual feature PRs do not select the release version.
 
-The workflow creates annotated tags with PR/SHA/version metadata and generated
-release notes. Existing tags and published releases are never moved or edited.
+The workflow creates annotated tags with PR/SHA/version metadata and concise
+release notes. Notes list deployed non-merge commit titles since the nearest
+published stable ancestor tag, falling back to an existing stable ancestor tag
+when no published baseline exists. This lists each normal feature squash once,
+without repeating its release-to-main promotion PR. Entries preserve ticket IDs
+and descriptions, omit authors/PR attribution, and strip trailing GitHub `(#123)`
+suffixes. Identical cleaned titles are deduplicated; different changes sharing
+a ticket stay separate. The release branch, immutable SHA and one full-changelog
+link retain release-level context. Out-of-order CI never selects a newer,
+non-ancestor tag as the notes baseline. Existing published notes, including
+`v1.0.1`, are not rewritten; the new format applies to future publications.
+Existing tags and published releases are never moved or edited.
 A successful retry is a no-op; a failure after tag reservation can resume that
 same version. Different merge SHAs use separate concurrency groups and atomic
 create-only tag allocation with collision retries, so pending releases are not
