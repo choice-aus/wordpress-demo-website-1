@@ -72,7 +72,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-          persist-credentials: false
       - name: Test release safety controls
         run: python3 -m unittest discover -s tests -v
       - name: Assess release cycle
@@ -118,12 +117,21 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.assessment.outputs.plan_artifact_name }}
+      - name: Validate cleanup identity and protected-operation rulesets
+        env:
+          CLEANUP_AUTH_MODE: ${{ vars.CLEANUP_AUTH_MODE || 'github-token' }}
+          CLEANUP_ACTOR: ${{ vars.CLEANUP_ACTOR }}
+          AUTOMATION_TOKEN: ${{ secrets.BRANCH_CLEANUP_TOKEN }}
+          BUILTIN_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ vars.CLEANUP_AUTH_MODE == 'automation-token' && secrets.BRANCH_CLEANUP_TOKEN || github.token }}
+        run: python3 .github/scripts/cleanup_auth.py
       - name: Revalidate, prepare and close approved release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ vars.CLEANUP_AUTH_MODE == 'automation-token' && secrets.BRANCH_CLEANUP_TOKEN || github.token }}
           PREPARATION_ONLY: ${{ inputs.preparation_only }}
         run: |
           set -euo pipefail
@@ -141,6 +149,7 @@ jobs:
             carryover-manifest.json
             closure-receipt.json
             promotion-receipt.json
+            cleanup-auth-report.json
             release-cycle-result.txt
       - name: Report outcome
         if: ${{ always() }}
