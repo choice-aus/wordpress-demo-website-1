@@ -381,6 +381,19 @@ adding the workflow alone does not make the check required. Retain
 titles are also still checked inside **Validate promotion path** during rollout,
 so existing required-check enforcement is preserved.
 
+## Protected cleanup credentials (DEV-225)
+
+Branch cleanup and Recovery branch housekeeping support an approved automation
+user's repository-scoped token, without installing a GitHub App. Separate active
+rulesets grant that user only staging force-push and release-deletion exceptions;
+normal main/release PR checks and staging deletion protection retain no bypass.
+
+See [Keep rulesets active: setup and live validation](docs/keep-rulesets-active.md).
+The default remains the built-in token until the account, environment secret,
+main-only approval environment, rulesets and repository variables are configured.
+Automation-token mode fails closed on missing credentials or unsafe settings.
+The implementation does not change live GitHub settings automatically.
+
 ## Outstanding backlog
 
 Completed DEV-220–222 implementation items have been removed from this backlog;
@@ -404,17 +417,12 @@ their operating instructions remain above. New ticket branches use
   deployment-completion signal before making published releases mean deployed
   releases. Establish a reliable guard or operating control against deleting
   any branch still configured on VIP; today that verification is manual.
-- **Keep rulesets active.** Keep staging
-   reset and release deletion restrictions enabled, granting the approved
-   closure workflow a controlled exception without installing a GitHub App.
-   Investigate a repository deploy key or a dedicated automation identity with
-   an appropriately scoped token and ruleset bypass. Confirm WordPress VIP and
-   organization policies allow the chosen credential. Split operational
-   restrictions from promotion/status-check rules so the exception need not
-   bypass ordinary PR checks. Protect credentials with the approval environment
-   and test rejected writes as well as permitted operations. GitHub supports
-   deploy-key and user/team bypass actors, but this has not been configured or
-   validated for this repository. See the [GitHub ruleset API](https://docs.github.com/en/rest/repos/rules).
+- **Validate protected cleanup rollout (DEV-225).** Confirm VIP/organization
+  approval for the dedicated automation user and token, apply the reviewed
+  ruleset/environment configuration, and test rejected writes as well as
+  permitted closure/housekeeping operations. The support is implemented;
+  account setup and live enforcement remain to be validated. Follow the
+  [rollout checklist](docs/keep-rulesets-active.md#validation-and-rollout).
 - **Check real-environment rollout.** Verify required checks on the intended VIP
   repository and install local hooks in each developer checkout. The validator
   implementation is complete; account/ruleset configuration is a separate task.
