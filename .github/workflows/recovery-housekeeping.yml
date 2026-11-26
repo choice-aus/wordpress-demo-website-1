@@ -87,12 +87,21 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.assessment.outputs.plan_artifact_name }}
+      - name: Validate cleanup identity and protected-operation rulesets
+        env:
+          CLEANUP_AUTH_MODE: ${{ vars.CLEANUP_AUTH_MODE || 'github-token' }}
+          CLEANUP_ACTOR: ${{ vars.CLEANUP_ACTOR }}
+          AUTOMATION_TOKEN: ${{ secrets.BRANCH_CLEANUP_TOKEN }}
+          BUILTIN_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ vars.CLEANUP_AUTH_MODE == 'automation-token' && secrets.BRANCH_CLEANUP_TOKEN || github.token }}
+        run: python3 .github/scripts/cleanup_auth.py
       - name: Revalidate and prune approved recovery refs
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ vars.CLEANUP_AUTH_MODE == 'automation-token' && secrets.BRANCH_CLEANUP_TOKEN || github.token }}
         run: |
           set -euo pipefail
           python3 -u .github/scripts/recovery_retention.py execute 2>&1 | tee retention-result.txt
@@ -104,6 +113,7 @@ jobs:
           path: |
             retention-plan.json
             retention-result.txt
+            cleanup-auth-report.json
       - name: Report outcome
         if: ${{ always() }}
         run: |
