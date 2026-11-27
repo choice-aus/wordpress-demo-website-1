@@ -75,9 +75,9 @@ below are therefore part of the design.
    `2026-03-10` when applying API payloads. Create the active operational guards
    **first**, then remove a duplicate force-push rule from `staging-protection`
    or deletion rule from `release-protection`, if present. Baseline rulesets
-   remain active, with their existing PR/check parameters preserved. The current
-   demo settings already lack those two restrictions; their proposal only adds
-   the two missing active guards.
+   remain active, with their existing PR/check parameters preserved. The proposal
+   reflects current settings: it creates missing guards or updates existing
+   guards, then splits duplicate operational restrictions where needed.
 5. Set repository variables **`CLEANUP_ACTOR`** to the username and
    **`CLEANUP_AUTH_MODE=automation-token`**. Dispatch approved operations from
    **main**. The preflight checks token ownership, main, exact environment branch
@@ -120,6 +120,36 @@ After review and explicit authorization of the settings changes:
 4. Run recovery housekeeping first as assessment-only, then approve a planned
    redundant-ref deletion. Verify its authentication report and exact ref SHAs.
    Check standalone release creation and the automatic publisher still work.
+
+## Demo validation record
+
+Verified for the demo repository on 27 November 2026:
+
+- [Preparation-only run 45909181613](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45909181613)
+  passed with the configured cleanup identity. It created a candidate/backup and
+  verified released content without resetting staging or deleting release/work refs.
+- [Full cleanup run 45910527422](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45910527422)
+  passed, promoted staging to verified main, removed its temporary candidate,
+  and deleted `feature/DEV-225` and `release-dev-225`. GitHub reported use of the
+  intended release-deletion bypass. All five rulesets remained active.
+- [Recovery housekeeping run 45911727118](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45911727118)
+  passed, deleting the redundant preparation-only candidate and an eligible older
+  backup while retaining the three assessed protected backups.
+- A separately approved disposable test authenticated as `ch-dweir` (repository
+  Admin). It copied the two operational guards, retaining only `explosive-action`
+  as bypass actor, onto `demo/dev-225-enforcement-probe`. GitHub rejected both a
+  forced ref rewind and deletion with HTTP 422 rule violations. Both temporary
+  guards and the disposable ref were removed. Independent read-back confirmed
+  the five existing rulesets unchanged and active, with main and staging still
+  at `1d4d2bbdd3e401abed055a28b5d093a4416f42e3`.
+
+The disposable test exercised equivalent rules through GitHub's ref API, not a
+force push/deletion against live staging or release refs. The demo PAT belongs
+to an existing organization owner; it demonstrates enforcement with a separate
+identity, not a dedicated Write-only production automation account. Production
+credential policy and the automation identity's forbidden-operation tests remain
+rollout tasks. Resolved preparation-only/failed backup holds remain a separate
+retention-policy backlog item.
 
 Until rollout, unset `CLEANUP_AUTH_MODE` (or `github-token`) retains the existing
 built-in-token behavior with **no** protection bypass. Once guards are enabled,
