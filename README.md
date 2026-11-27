@@ -1,6 +1,20 @@
 # wordpress-demo-website-1
 
-### Startup flow for this template ###
+This disposable WordPress repository demonstrates a release branching strategy,
+shared UAT, unreleased-work carryover, GitHub source releases and guarded release
+closure. The deployment workflow is a placeholder; no VIP deployment or branch
+mapping integration is enabled.
+
+## Local startup
+
+Use Docker with Compose, plus Composer and a compatible PHP environment
+(`composer.json` requires PHP 8.2+ and `mysqli`). Before starting:
+
+- Configure the ignored `.env` with the database credentials and port variables
+  referenced by [docker-compose.yml](docker-compose.yml).
+- Resolve `mysite1.test` to your local Docker host, normally `127.0.0.1`.
+- Supply local TLS files `certs/mysite1.test.pem` and
+  `certs/mysite1.test-key.pem`, matching [the Nginx configuration](docker/nginx/default.conf).
 
 ```bash
 composer install
@@ -8,26 +22,22 @@ docker compose build
 docker compose up -d
 ```
 
-### Restart cleanly: ### 
+Restart the containers while preserving the database volume:
+
 ```bash
 docker compose down
 docker compose up -d --build
 ```
 
-### Sanity Checklist ###
+With this checkout's current `.env` ports, use:
 
-After everything is up:
+| Service | URL |
+| --- | --- |
+| WordPress | <https://mysite1.test:4441/> |
+| phpMyAdmin | <http://localhost:8082> |
+| MailHog | <http://localhost:8025> |
 
-Visit:
-👉 https://mysite1.test:4441/
-
-phpMyAdmin:
-👉 http://localhost:8082
-
-Mailhog:
-👉 http://localhost:8025
-
----
+Use the corresponding configured ports if your local `.env` differs.
 
 ## Git Branching Strategy
 
@@ -37,12 +47,16 @@ Mailhog:
 |---|---|
 | `main` | Trusted, production-ready code |
 | `develop` | Sandbox for experimentation and early integration testing |
-| `staging` | Shared sprint integration and testing |
+| `staging` | Shared UAT for work being tested before release |
 | `release-*` | Temporary release branches for approved features |
 | `feature/*` | Individual development tasks |
 | `fix/*`, `hotfix/*`, `chore/*` | Fixes, urgent fixes and maintenance using the same promotion flow |
 
 ### Promotion workflow
+
+Name ticket branches `<type>/DEV-123`, for example `feature/DEV-123` or
+`chore/DEV-227`. All four work-branch prefixes below follow the same path;
+`hotfix/*` does not have a direct-to-main exception.
 
 1. Create `feature/*`, `fix/*`, `hotfix/*` or `chore/*` branches from `main`.
 2. Merge these work branches into `staging` as work progresses. Pull requests are optional.
@@ -62,21 +76,26 @@ Mailhog:
 ### Merge methods
 
 | Destination | Merge method |
-|---|---|
+| :--- | :--- |
 | `staging` | Merge commit (PR optional) |
 | `release-*` | Squash and merge |
 | `main` | Merge commit |
 
 ## Creating a release branch independently
 
-Run **Create release branch** from `main` and provide its single input,
-`release_branch` (for example `release-dev-224`). The workflow creates that name
-from the exact current main SHA and records the result in its summary and
+### Workflow: Create release branch
+
+Run from **main**.
+
+| Parameter | Value |
+| :--- | :--- |
+| `release_branch` | New, unused branch name, for example `release-dev-227` |
+
+The workflow creates that name from the exact current main SHA and records the result in its summary and
 `release-branch-creation.json` artifact. It does not move an existing branch,
 publish a GitHub Release, reset staging, clean up refs or change VIP settings.
 It shares the closure/housekeeping concurrency lock. A changed main SHA or a
 concurrently created name stops creation; a retry never overwrites existing work.
-`release-dev-223` already exists for DEV-223 and does not need to be recreated.
 
 If you use this standalone workflow to pre-create the next release, leave
 `next_release` blank when running **Close release cycle**. That input is for creating
@@ -121,9 +140,18 @@ when main has advanced. GitHub refs and Releases are separate API operations;
 failures can leave a reserved tag awaiting publication. Never repoint that tag
 to recover from a failure.
 
-For an explicit retry, run the workflow from `main` with `merge_sha` set to the
-original full release-to-main merge SHA; all eligibility and CI checks still
-apply. No typing of a version is required. The existing `v1.0.0` release is
+### Workflow: Publish GitHub source release
+
+Publication normally starts automatically after successful main CI. For an
+explicit retry, run from **main** with:
+
+| Parameter | Value |
+| :--- | :--- |
+| `merge_sha` | Original full, 40-character release-to-main merge SHA |
+
+All eligibility and CI checks still apply. Retrying an already published SHA
+returns `already-published` without creating another version.
+No typing of a version is required. The existing `v1.0.0` release is
 preserved, and the first new patch version is based on the highest stable
 SemVer tag present when allocation runs. Tags created by this workflow must
 remain immutable by team policy and the eventual tag-protection configuration.
@@ -139,13 +167,19 @@ deployment-status events, but the real VIP signal still needs to be selected.
 See [GitHub workflow events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
 and [GitHub Releases and tags](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
 
-Merging DEV-223 into main enables this automatic publishing path after its main
-push CI passes. The first live tag/release publication still needs operational
-validation; local tests mock GitHub writes. `GITHUB_TOKEN` release/tag writes do
+Automatic patch publication and an `already-published` retry are verified through
+[`v1.0.4`](https://github.com/choice-aus/wordpress-demo-website-1/releases/tag/v1.0.4).
+Minor/major label overrides and mismatched-tag rejection have automated coverage;
+their live publication tests are explicitly deferred for this demo.
+`GITHUB_TOKEN` release/tag writes do
 not themselves start ordinary downstream Actions event workflows, so future
 deployment chaining must be explicit rather than relying on that side effect.
 
 ## VIP deployment branches and release environments
+
+This section is planning guidance for team adoption after the demo, outside this
+repository's implementation scope. Confirm actual platform configuration before
+using it; the demo does not interact with VIP.
 
 VIP Default Deployment tracks a specific branch in the application's configured
 wpcomvip repository. Updating that configured branch in the Dashboard requires
@@ -179,12 +213,15 @@ demo repository versus a wpcomvip mirror), environment mappings and whether a
 CI/CD-built branch is used. VIP reserves the `*-built` suffix for build/deploy
 flows; source release branches and deployment branches need not be identical.
 See [VIP build and deploy](https://docs.wpvip.com/code-deployment/default-deployment/build-and-deploy/).
-No VIP integration or automatic mapping validation is enabled by DEV-223.
+No VIP integration or automatic mapping validation is enabled in this repository.
 
 ## UAT Demonstration
 
-This change is used to demonstrate the handling of a feature that fails UAT and must be carried forward into a future staging cycle.
-
+The DEV-212/DEV-218 cycles demonstrated keeping an unreleased feature while
+removing a deployed feature's squashed commits from the next UAT cycle. DEV-212
+was subsequently released with DEV-219; it is historical test evidence, not
+currently pending carryover. Closure also supports cycles with no carryovers,
+where verified staging becomes identical to main.
 
 ## Closing a release cycle
 
@@ -197,39 +234,96 @@ The selected release must itself be cleanup eligible, with no open source PRs
 or protected PR labels, before assessment or any writes can proceed. This also
 applies to preparation-only runs.
 
-- `confirm_closed=false` performs assessment only.
-- `confirm_closed=true`, `preparation_only=true` prepares and verifies a candidate
-  after environment approval. It creates a backup/candidate and publishes
-  successful carryovers, but never resets staging or deletes branches.
-- `confirm_closed=true`, `preparation_only=false` prepares, verifies, resets staging
-  to the verified candidate and deletes eligible feature/release branches after
-  environment approval. Each work branch must pass exact combined-diff or
-  clean reconstructed-tree verification against its squash in main; the release
-  must have reached main through a merge commit. The reconstruction handles
-  changes already released separately, including the DEV-215 historical case.
-- `audit_mode=specific` selecting an older completed release allows verified branch
-  cleanup only. It never prepares a candidate or resets staging. Preparation-only
-  mode on an older release performs no writes.
-- `next_release=release-<new-name>` optionally creates the next release from the
-  assessed main SHA after staging promotion and branch cleanup succeed. The name
-  must be new; an existing branch is never moved or adopted. Leave blank to skip.
-- `remove_candidate=true` (the default) deletes this run's temporary candidate
-  immediately after staging promotion verifies, using its exact SHA lease.
-  Staging retains the verified commit and the original backup remains. Candidate
-  removal happens before feature/release cleanup, so failure of that later task
-  does not leave a redundant candidate behind. Set `false` only to retain it
-  deliberately for troubleshooting.
-  Preparation-only runs never create the next release or remove a candidate.
-  Older-release cleanup has no candidate to remove and disables this option;
-  requests to create a next release in that mode are rejected.
+### Workflow: Close release cycle
+
+Run from **main**. For checkbox inputs, `true` means checked and `false` means
+unchecked. Choose the table for the operation you want.
+
+#### Assessment only
+
+| Parameter | Value |
+| :--- | :--- |
+| `audit_mode` | `latest` |
+| `completed_release` | Leave blank |
+| `confirm_closed` | `false` |
+| `preparation_only` | `true` |
+| `next_release` | Leave blank |
+| `remove_candidate` | `true` |
+
+Records the plan without creating branches, resetting staging or deleting refs.
+Only assessment runs because `confirm_closed` is unchecked; candidate removal
+does not apply.
+
+#### Prepare and verify without resetting staging
+
+| Parameter | Value |
+| :--- | :--- |
+| `audit_mode` | `latest` |
+| `completed_release` | Leave blank |
+| `confirm_closed` | `true` |
+| `preparation_only` | `true` |
+| `next_release` | Leave blank |
+| `remove_candidate` | `true` |
+
+After environment approval, creates a backup/candidate and publishes successful
+carryovers. Staging and release/work branches remain unchanged. Preparation-only
+mode always retains its candidate, regardless of `remove_candidate`.
+
+#### Close the latest release and reset staging
+
+| Parameter | Value |
+| :--- | :--- |
+| `audit_mode` | `latest` |
+| `completed_release` | Leave blank |
+| `confirm_closed` | `true` |
+| `preparation_only` | `false` |
+| `next_release` | Leave blank |
+| `remove_candidate` | `true` |
+
+After assessment and environment approval, prepares and verifies carryovers,
+resets staging to the verified candidate, removes that candidate and deletes
+eligible work/release branches. The original staging backup remains.
+
+For optional follow-up behavior, change the corresponding value in that table:
+
+| Parameter | Optional value |
+| :--- | :--- |
+| `next_release` | New, unused `release-*` name to create from assessed main after closure |
+| `remove_candidate` | `false` to retain this run's candidate for troubleshooting |
+
+An existing next-release branch is never moved or adopted. Leave `next_release`
+blank if you already created it with **Create release branch**. Candidate removal
+uses its exact SHA lease immediately after verified staging promotion, before
+work/release cleanup; failure of that later cleanup does not leave the candidate
+behind.
+
+#### Clean up an older completed release only
+
+| Parameter | Value |
+| :--- | :--- |
+| `audit_mode` | `specific` |
+| `completed_release` | Existing completed `release-*` branch older than the latest release |
+| `confirm_closed` | `true` |
+| `preparation_only` | `false` |
+| `next_release` | Leave blank |
+| `remove_candidate` | `false` |
+
+Performs verified branch cleanup after approval. An older release cannot prepare
+a candidate, reset staging or create a next release. To assess it without writes,
+use the same values with `confirm_closed=false`; preparation-only mode on an
+older release also performs no writes.
+
+Each work branch must pass exact combined-diff or clean reconstructed-tree
+verification against its squash in main; the release must have reached main
+through a merge commit. The reconstruction handles changes already released
+separately, including the DEV-215 historical case.
 
 The assessment lists **all assessed branches**, including excluded branches
 and their reasons. A missing/deleted selected release gets a specific error.
 
-Use **Close release cycle** with `preparation_only=true` for preparation without
-resetting staging; it uses the same approval and concurrency controls.
-Use the reviewed workflow revision when dispatching; use main once these changes
-have been reviewed and promoted there.
+Dispatch operational workflows from **main**. Automation-token mode requires that
+branch, and the `branch-cleanup` approval environment must allow exactly branch
+`main`, with no tags or wildcard branch policies.
 
 Carryovers use the exact revisions recorded in labelled, merged staging PRs,
 excluding subsequent feature-branch changes. Successful merges are preserved
@@ -263,8 +357,11 @@ assessment and review it before approving execution.
 Release eligibility and branch SHAs are revalidated after approval and before
 writes. Staging updates use an explicit SHA lease; cleanup uses one atomic push
 with a lease for each branch. Concurrent changes to write targets reject the
-push. GitHub protection rules can also reject writes; the workflow does not
-bypass them. Main, PR metadata and unrelated refs are re-read before writes, but
+push. With automation-token mode configured, the approved account bypasses only
+the staging force-push and release-deletion guards. Main/release PR checks,
+staging deletion protection and other matching rules remain enforced; cleanup
+does not disable rulesets. GitHub can still reject a write. Main, PR metadata
+and unrelated refs are re-read before writes, but
 Git offers no atomic transaction covering API metadata and unrelated refs: avoid
 merging a new release or changing carryover labels during closure. If eligibility
 changes after staging promotion, release cleanup stops. Staging retains the
@@ -276,11 +373,45 @@ retrying. Do not recreate the deleted completed release merely to rerun it.
 
 ## Temporary candidates and backup retention
 
-Run **Clean up recovery branches** from the reviewed workflow revision,
-using main after promotion. Start with `confirm_delete=false` to assess only.
-Select `scope=candidates` (the default), `scope=backups`, or `scope=all`.
-It shares the closure concurrency lock and never resets staging or deletes
-work/release branches. Review `retention-plan.json` and the reasons in the
+### Workflow: Clean up recovery branches
+
+Run from **main**. The following tables assess and clean both supported recovery
+branch types. The normal backup minimum age is 30 days.
+
+#### Assess candidates and backups
+
+| Parameter | Value |
+| :--- | :--- |
+| `scope` | `all` |
+| `include_legacy_candidates` | `false` |
+| `retention_days` | `30` |
+| `confirm_delete` | `false` |
+
+Creates an assessment without deleting branches. For a short demo policy, use
+`3` days; the DEV-226 closeout used `1`. Keep that chosen age for the deletion run.
+
+#### Delete the assessed eligible branches
+
+| Parameter | Value |
+| :--- | :--- |
+| `scope` | `all` — match your assessment |
+| `include_legacy_candidates` | `false` — match your assessment |
+| `retention_days` | `30` — use the same age as your assessment |
+| `confirm_delete` | `true` |
+
+Review the new assessment before approving the environment job. A fresh run
+reassesses eligibility; the approved plan is revalidated before deletion.
+
+Choose a narrower scope in either table when required:
+
+| `scope` value | Branches assessed |
+| :--- | :--- |
+| `candidates` | Temporary staging candidates only; workflow default; no age/cycle retention |
+| `backups` | Staging backups only; cycle and age retention apply |
+| `all` | Both candidates and backups |
+
+The workflow shares the closure concurrency lock and never resets staging or
+deletes work/release branches. Review `retention-plan.json` and the reasons in the
 summary. With `confirm_delete=true`, the `branch-cleanup` environment approval
 is required, and all refs, run evidence and content preservation are revalidated
 before one atomic push with a lease for every deletion target.
@@ -293,10 +424,17 @@ Active/waiting runs, open source PRs and candidates with unique or unresolved
 changes are kept. Candidate-only assessment reads run metadata and content
 proof; it does not download expiring backup artifacts.
 
-For the one-time legacy tidy-up, select `scope=candidates`,
-`include_legacy_candidates=true`, and `confirm_delete=false`. This explicitly
-reviews old names such as `staging-next-cycle` or candidates whose run can no
-longer be identified. They still need content-preservation proof, and are kept
+#### Assess legacy candidates explicitly
+
+| Parameter | Value |
+| :--- | :--- |
+| `scope` | `candidates` |
+| `include_legacy_candidates` | `true` |
+| `retention_days` | `30` — ignored for candidates |
+| `confirm_delete` | `false` |
+
+This explicitly reviews old names such as `staging-next-cycle` or candidates
+whose run can no longer be identified. They still need content-preservation proof, and are kept
 if a known preparation is active or waiting. Review the proposed deletions, then
 start a new run with the same scope/legacy option and `confirm_delete=true` to
 request approved deletion. This scope cannot delete backup branches. Candidates
@@ -305,16 +443,25 @@ abandonment; this workflow does not discard their unique content.
 
 **Backups only:** the default policy retains the latest **3 verified successful
 cycles** and everything younger than **30 days**. The `retention_days` input
-defaults to `30`; for this fast-changing demo, select `3` without editing code.
-It must be a positive whole number. Backups of the latest three successful cycles
+defaults to `30`; select `3` for a shorter demo policy without editing code.
+The DEV-226 closeout tests used `1`. It must be a positive whole number.
+Backups of the latest three successful cycles
 are always kept, regardless of age. Both thresholds must be passed before older
 backups are eligible for deletion. The chosen
 value is stored in the assessment and reused during post-approval revalidation.
 Retention is not automatic after every release; it is a separate assessed action.
 
-For a backup demo preview, select `scope=backups`, `retention_days=3`
-and `confirm_delete=false`. Review the listed reasons, then use the same age
-with `confirm_delete=true` for an approved deletion run. Locally, the equivalent
+#### Assess backups with a shorter demo age
+
+| Parameter | Value |
+| :--- | :--- |
+| `scope` | `backups` |
+| `include_legacy_candidates` | `false` |
+| `retention_days` | `3` |
+| `confirm_delete` | `false` |
+
+Review the listed reasons, then use the same inputs with `confirm_delete=true`
+for an approved deletion run. Locally, the equivalent
 read-only assessment is `python3 .github/scripts/recovery_retention.py assess --scope backups --min-days 3`
 with `GITHUB_REPOSITORY` and GitHub authentication configured. Omitting
 `--min-days` uses the script's `DEFAULT_MIN_DAYS` value of 30.
@@ -329,8 +476,8 @@ SHA and exact backup SHA. Every shared use must be resolved; newer failures,
 active runs, missing timestamps, unknown revisions and unrelated releases still
 protect the backup. Resolving a hold does not bypass the three-cycle/age policy,
 current content proof, exact SHA checks, approval or leased deletion.
-Missing/expired artifacts and
-legacy names without sufficient proof produce **Keep**, not deletion permission.
+Missing/expired artifacts and legacy names without sufficient proof produce
+**Keep**, not deletion permission.
 Network/authentication errors block assessment rather than being treated as
 missing proof. Artifact retention therefore affects how much historical cleanup
 can be verified; unknown legacy backups need separate manual investigation.
@@ -341,12 +488,10 @@ from backups, lists exact deletion SHAs, and groups retained branches by reason.
 Scope, legacy-review permission, run states and all relevant refs are recorded
 in the plan and revalidated after approval. Changes require a fresh assessment.
 
-Suggested DEV-222 rollout: review the candidate-only legacy inventory and run
-the local tests, then promote through staging and release to main. Start with a
-candidate-only housekeeping assessment; after review, request deletion separately.
-Close the next release with an explicit new release name and default candidate removal.
-Verify main/staging and retained backup SHAs. Remote executions and deletions
-require explicit authorisation.
+For routine operation, assess the intended scope first, review the exact refs
+and SHAs, then request approved deletion using the same inputs with
+`confirm_delete=true`. No eligible refs is a valid result. Verify main/staging
+and retained backup SHAs after release closure or housekeeping.
 
 Run the release safety tests locally with:
 
@@ -378,45 +523,52 @@ objects are unavailable. First pushes of new branches exclude existing
 and PR titles must follow the title rule.
 
 Actions runs the same validator as the separate **Commit title check** on
-pushes and PRs into staging, release branches and main. Local hooks can be
-skipped, so add **Commit title check** as a required status check in those
-rulesets after the new check has run. This is a separate GitHub settings change;
-adding the workflow alone does not make the check required. Retain
-**Validate promotion path** and the other existing required checks. Commit
-titles are also still checked inside **Validate promotion path** during rollout,
-so existing required-check enforcement is preserved.
+supported work-branch pushes and on pushes/PRs into staging, release branches
+and main. Local hooks can be skipped. At the DEV-227 review, the demo's main and
+release rulesets require **Validate promotion path** and **PHP and theme checks**;
+the standalone **Commit title check** is not yet separately required. Commit
+titles remain checked inside the required **Validate promotion path** PR job.
+Making the standalone check required is a separate repository-settings action;
+retain the existing required checks when applying that configuration elsewhere.
 
-## Protected cleanup credentials (DEV-225)
+## Protected cleanup credentials
 
 Close release cycle and Clean up recovery branches support an approved automation
 user's repository-scoped token, without installing a GitHub App. Separate active
 rulesets grant that user only staging force-push and release-deletion exceptions;
 normal main/release PR checks and staging deletion protection retain no bypass.
 
-See [Keep rulesets active: setup and live validation](docs/keep-rulesets-active.md).
-The default remains the built-in token until the account, environment secret,
-main-only approval environment, rulesets and repository variables are configured.
-Automation-token mode fails closed on missing credentials or unsafe settings.
-The implementation does not change live GitHub settings automatically.
+This demo is configured with `CLEANUP_AUTH_MODE=automation-token`, an approved
+account's PAT in the `branch-cleanup` environment, and a main-only approval
+policy. The account is an existing organization owner, not a dedicated Write-only
+automation identity. Its scoped token and the five active rulesets have been
+exercised in the demo. The exception belongs to the account, not just its PAT;
+repository Admin access alone does not grant a bypass.
 
-## Demo workflow menu (DEV-226)
+See [Keep rulesets active: setup and live validation](docs/keep-rulesets-active.md)
+for setup on another repository and the DEV-225 evidence. An unconfigured
+repository defaults to the built-in token, which has no operational bypass.
+Automation-token mode fails closed on missing credentials or unsafe settings;
+the implementation never changes live settings automatically.
 
-Display names describe the action; filenames remain stable so reusable calls and
-historical retention-evidence lookups continue working. DEV-226 renames **Branch
-cleanup** to **Close release cycle**, and **Recovery branch housekeeping** to
-**Clean up recovery branches**. The latter covers backups and temporary candidates.
+## Demo workflow menu
 
-| Workflow | Purpose | Recommendation |
+There are seven current workflows. Filenames remain stable for reusable calls
+and historical evidence lookup. **Close release cycle** was previously named
+**Branch cleanup**; **Clean up recovery branches** was previously **Recovery branch
+housekeeping** and covers backups as well as temporary candidates.
+
+| Workflow | Purpose | Trigger |
 | --- | --- | --- |
-| [Close release cycle](.github/workflows/branch-cleanup.yml) | Assess, preserve carryover, reset staging, remove completed branches; optionally create the next release | Keep |
-| [Clean up recovery branches](.github/workflows/recovery-housekeeping.yml) | Assess and retire redundant candidates and expired eligible backups | Keep |
-| [Create release branch](.github/workflows/create-release-branch.yml) | Create a named release branch from trusted main | Keep |
-| [Deploy WordPress wp-content](.github/workflows/deploy.yml) | Demonstrate environment selection; deployment command is currently a placeholder | Keep |
-| [CI](.github/workflows/ci.yml) | Required PHP/theme checks and release-safety tests; triggers source-release publication | Keep |
-| [Validate PR source](.github/workflows/validate-pr.yml) | Promotion-path, PR-title and commit-title checks | Keep |
-| [Publish GitHub source release](.github/workflows/publish-github-release.yml) | Publish a versioned source release after successful main CI | Keep |
+| [Close release cycle](.github/workflows/branch-cleanup.yml) | Assess, preserve carryover, reset staging, remove completed branches; optionally create the next release | Manual or reusable call |
+| [Clean up recovery branches](.github/workflows/recovery-housekeeping.yml) | Assess and retire redundant candidates and expired eligible backups | Manual |
+| [Create release branch](.github/workflows/create-release-branch.yml) | Create a named release branch from trusted main | Manual |
+| [Deploy WordPress wp-content](.github/workflows/deploy.yml) | Demonstrate environment selection; deployment command is currently a placeholder | Push to develop, staging, main or release-* |
+| [CI](.github/workflows/ci.yml) | Required PHP/theme checks and release-safety tests; triggers source-release publication | Push or PR |
+| [Validate PR source](.github/workflows/validate-pr.yml) | Promotion-path, PR-title and commit-title checks | Relevant pushes and PRs |
+| [Publish GitHub source release](.github/workflows/publish-github-release.yml) | Publish a versioned source release after successful main CI | CI completion on main or manual retry |
 
-DEV-226 removes four superseded workflows, reducing the menu from 11 to 7:
+DEV-226 removed four superseded workflows:
 **DEV-215 - Test repository write access**, **Prepare next UAT cycle**,
 **Branch cleanup audit**, and **Staging reset readiness check**. Preparation-only
 use remains available through **Close release cycle** with `preparation_only=true`;
@@ -427,33 +579,35 @@ run history so retired preparation workflows can still be identified without
 querying a deleted workflow filename. Do not rename **CI** or its required job
 names without updating the publisher trigger and repository check settings.
 
-## Outstanding backlog
+## Demo validation and backlog
 
-Completed implementation and verified demo rollout checks have been removed
-from this backlog; their operating instructions remain above. New ticket branches use
-`feature/DEV-123` (or an approved work-branch prefix) and start from current main.
+No outstanding demo implementation tasks remain from the DEV-225/226 backlog.
+The following closeout results were verified on 27 November 2026:
 
-DEV-225 demo validation is complete for approved preparation, protected staging
-reset, feature/release deletion and recovery housekeeping. Rejection tests also
-passed for the developer's Admin account using equivalent guards on a disposable
-branch. Existing rulesets and main/staging remained unchanged by those probes.
-See the [validation record and remaining limits](docs/keep-rulesets-active.md#demo-validation-record).
-Automatic patch publication is verified through
-[`v1.0.3`](https://github.com/choice-aus/wordpress-demo-website-1/releases/tag/v1.0.3),
-and local commit hooks are installed in this WSL checkout.
+| Check | Result/evidence |
+| --- | --- |
+| Protected preparation, staging reset, work/release deletion and candidate removal | [DEV-225 validation record](docs/keep-rulesets-active.md#demo-validation-record) |
+| Developer Admin account denied forced update/deletion | Equivalent guard copies on a disposable branch; existing rulesets and main/staging unchanged, as recorded above |
+| Resolved preparation-only backup hold | [Assessment 45936372212](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45936372212) retained the DEV-225 backup under normal three-cycle policy |
+| Full DEV-226 closure with renamed workflow | [Run 45936870815](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45936870815) reset staging, removed its candidate, and deleted the completed work/release branches |
+| Backup retention after the next cycle | [Assessment 45938243157](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45938243157) retained the latest three cycles and identified one eligible older backup |
+| Approved backup retirement | [Run 45938463167](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45938463167) deleted only the assessed older backup `backup/staging-before-reset-f061dd3bb227` |
+| Source publication and retry | [`v1.0.4`](https://github.com/choice-aus/wordpress-demo-website-1/releases/tag/v1.0.4) published at the exact DEV-226 merge SHA; its manual retry returned `already-published` |
+| Standalone release-branch creation | [Run 45934961617](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45934961617) created `release-dev-226` from then-current main |
+| Existing release-branch rejection | [Run 45936672212](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45936672212) deliberately failed with `already exists; no branch was moved` |
 
-- **Validate DEV-226 backup retirement.** The local implementation resolves
-  historical holds only after a later verified closure covers the exact same
-  release revision and backup. After promotion, assess backups with the usual
-  three-cycle/minimum-age policy; the DEV-225 backup should be kept by normal
-  cycle/age retention, rather than its superseded preparation-only hold. Review
-  any deletion plan before approving execution. Unknown legacy provenance still
-  requires manual investigation; there is no automatic legacy-adoption override.
-- **Validate remaining release automation cases.** Test minor/major PR-label
-  overrides, duplicate/retry behavior and rejection of mismatched existing tag
-  targets in Actions. Validate standalone branch creation and rejection of an
-  existing name; no runs of that workflow were found during this review.
-  These paths have local automated coverage, but live validation is outstanding.
+Minor/major label overrides and mismatched-tag rejection remain covered by
+automated tests. Their live publication tests are explicitly deferred, not
+reported as passed. Unknown legacy backup provenance still requires manual
+investigation; no automatic legacy-adoption override is implemented.
+
+All four work-branch prefixes have local automated policy, carryover and cleanup
+coverage. This documentation change uses `chore/DEV-227` to exercise the chore
+prefix live: merge the work branch into staging for UAT and separately into a
+release, then merge the release into main. Its live promotion and closure are
+pending; `fix/*` and `hotfix/*` have not been separately exercised through that
+live flow. Local commit hooks are installed in this WSL checkout; each developer
+checkout needs its own installation.
 
 ## After demo approval (outside this demo repository's scope)
 
