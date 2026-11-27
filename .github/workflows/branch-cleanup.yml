@@ -106,6 +106,7 @@ jobs:
     needs: assessment
     if: ${{ inputs.confirm_closed == true }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: branch-cleanup
     permissions:
       contents: write
@@ -148,6 +149,7 @@ jobs:
             release-cycle-plan.json
             carryover-manifest.json
             closure-receipt.json
+            next-release-result.json
             promotion-receipt.json
             cleanup-auth-report.json
             release-cycle-result.txt
