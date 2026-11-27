@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 # Coordinate with closure and recovery housekeeping; never cancel their writes.
 concurrency:
@@ -20,6 +21,7 @@ jobs:
   create:
     name: Create named branch from main
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Require reviewed workflow from main
         env:

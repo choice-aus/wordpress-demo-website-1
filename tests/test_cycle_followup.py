@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / '.github/scripts'))
 import release_cycle as cycle
 import uat_carryover as carry
+import create_release_branch as creation
 
 
 class FollowupTests(unittest.TestCase):
@@ -33,8 +35,18 @@ class FollowupTests(unittest.TestCase):
              patch.object(cycle, 'github') as api, \
              patch.object(cycle, 'git') as git, \
              patch.object(cycle, 'Path') as path, \
+             patch.object(creation, 'matching_refs', return_value=existing or []), \
+             patch.object(creation, 'remote_sha', side_effect=lambda repo, branch: refs[branch]), \
+             patch.object(creation, 'wait_for_ci'), \
+             patch.object(creation, 'push_ci_runs', return_value=[]), \
+             patch.object(creation, 'github', side_effect=lambda *args: api(*args)), \
              patch.dict(os.environ, GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1'):
+            api.return_value = dict(ref='refs/heads/release-next', object=dict(sha='a' * 40))
             yield api, git, path
+
+    def closure(self, path):
+        return next(json.loads(call.args[0]) for call in path.return_value.write_text.call_args_list
+                    if json.loads(call.args[0]).get('closure_complete') is True)
 
     def test_next_release_and_receipt_do_not_require_already_removed_candidate(self):
         with self.guarded() as (api, git, path):
@@ -42,10 +54,12 @@ class FollowupTests(unittest.TestCase):
             api.assert_called_once_with('api', 'repos/choice/repo/git/refs', '--method', 'POST',
                                         '-f', 'ref=refs/heads/release-next', '-f', 'sha=' + 'a' * 40)
             git.assert_not_called()
-            receipt = json.loads(path.return_value.write_text.call_args.args[0])
+            receipt = self.closure(path)
             self.assertEqual(receipt['backup_sha'], 'b' * 40)
             self.assertTrue(receipt['candidate_removed'])
-            self.assertEqual(receipt['next_release'], 'release-next')
+            self.assertEqual(receipt['schema'], 2)
+            self.assertEqual(receipt['next_release_requested'], 'release-next')
+            self.assertEqual(receipt['deleted_branches'], self.plan['cleanup'])
 
     def test_promoted_candidate_removal_uses_exact_lease_and_keeps_backup(self):
         with self.guarded() as (api, git, path):
@@ -87,8 +101,41 @@ class FollowupTests(unittest.TestCase):
             cycle.finish_cycle(self.plan, 'candidate', 'd' * 40, 'backup')
             api.assert_not_called()
             git.assert_not_called()
-            receipt = json.loads(path.return_value.write_text.call_args.args[0])
+            receipt = self.closure(path)
             self.assertFalse(receipt['candidate_removed'])
+
+    def test_optional_creation_failure_preserves_closure_receipt_and_records_recovery(self):
+        with self.guarded() as (api, git, path):
+            def fail(*args):
+                self.assertTrue(self.closure(path)['closure_complete'])
+                raise subprocess.CalledProcessError(1, ['gh', 'api'], stderr='Reference update failed (HTTP 422)')
+            api.side_effect = fail
+            with self.assertRaisesRegex(RuntimeError, 'Release closure completed; next-release setup failed'):
+                cycle.finish_cycle(self.plan, 'candidate', 'd' * 40, 'backup', True)
+            result = json.loads(path.return_value.write_text.call_args.args[0])
+            self.assertEqual(result['status'], 'failed')
+            self.assertEqual(result['branch'], 'release-next')
+            git.assert_not_called()
+
+    def test_timeout_keeps_completed_closure_and_skips_branch_creation(self):
+        with self.guarded() as (api, _, path), \
+             patch.object(creation, 'wait_for_ci', side_effect=RuntimeError('Timed out waiting for CI')):
+            with self.assertRaisesRegex(RuntimeError, 'Release closure completed; next-release setup failed'):
+                cycle.finish_cycle(self.plan, 'candidate', 'd' * 40, 'backup', True)
+            self.assertTrue(self.closure(path)['closure_complete'])
+            self.assertEqual(json.loads(path.return_value.write_text.call_args.args[0])['status'], 'failed')
+            api.assert_not_called()
+
+    def test_staging_or_backup_move_during_wait_blocks_followup_without_losing_closure(self):
+        for branch in ('staging', 'backup'):
+            refs = dict(self.refs)
+            with self.subTest(branch=branch), self.guarded(refs) as (api, _, path), \
+                 patch.object(creation, 'wait_for_ci', side_effect=lambda *args, **kwargs:
+                              refs.update({branch: 'f' * 40})):
+                with self.assertRaisesRegex(RuntimeError, 'changed after cleanup'):
+                    cycle.finish_cycle(self.plan, 'candidate', 'd' * 40, 'backup', True)
+                self.assertTrue(self.closure(path)['closure_complete'])
+                api.assert_not_called()
 
     def test_changed_live_refs_block_all_followup_writes(self):
         for branch in self.refs:

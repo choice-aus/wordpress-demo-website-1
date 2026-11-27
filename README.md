@@ -89,13 +89,23 @@ Run from **main**.
 
 | Parameter | Value |
 | :--- | :--- |
-| `release_branch` | New, unused branch name, for example `release-dev-227` |
+| `release_branch` | New, unused branch name, for example `release-dev-228` |
 
 The workflow creates that name from the exact current main SHA and records the result in its summary and
 `release-branch-creation.json` artifact. It does not move an existing branch,
 publish a GitHub Release, reset staging, clean up refs or change VIP settings.
 It shares the closure/housekeeping concurrency lock. A changed main SHA or a
 concurrently created name stops creation; a retry never overwrites existing work.
+
+Both this workflow and optional next-release creation during closure wait up to
+10 minutes for same-SHA push CI to settle, including checks triggered by PAT
+pushes to staging/candidates. The latest push CI must succeed, no same-SHA push
+CI may remain active, and a short stable interval allows delayed events to appear.
+Main and target absence are rechecked while waiting and immediately before the
+create-only request. Closure also rechecks staging, backup and approval state.
+An HTTP 422 permits one further create-only attempt only when new active CI is
+positively observed; the same total time bound applies. Other failures stop
+creation. Required-check rules remain enabled and GitHub makes the final decision.
 
 If you use this standalone workflow to pre-create the next release, leave
 `next_release` blank when running **Close release cycle**. That input is for creating
@@ -344,7 +354,12 @@ overwritten or deleted by **Close release cycle**. Candidates use
 `staging-next-cycle-<run-id>-<attempt>` so a rerun preserves previous preparation
 results. A successful staging promotion writes `promotion-receipt.json` before
 release cleanup and records candidate removal there, even if a later step fails.
-A successful full latest-release closure also writes `closure-receipt.json`.
+A successful full latest-release closure writes a schema-2 `closure-receipt.json`
+**before** optional next-release setup. It records the approved deleted branch
+SHAs and completed staging promotion. A separate `next-release-result.json`
+records `not-requested`, `pending`, `created` or `failed` for that follow-up.
+The receipt remains valid if optional setup fails or times out; it never claims
+that a next release was created. Both files are uploaded with the other evidence.
 Both receipts are uploaded as evidence, so the temporary branch is not needed
 for reporting. Assessment-only runs create neither candidates nor backups.
 Existing refs require a separate housekeeping assessment; merely deploying
@@ -367,9 +382,11 @@ merging a new release or changing carryover labels during closure. If eligibilit
 changes after staging promotion, release cleanup stops. Staging retains the
 verified commit and the backup retains original staging; the workflow does not
 attempt a rollback. If candidate removal fails, execution stops before release
-cleanup. If next-release creation fails after cleanup, earlier successful
-operations remain in place; inspect the evidence before
-retrying. Do not recreate the deleted completed release merely to rerun it.
+cleanup. If next-release creation fails after cleanup, the job still reports a
+failure for that follow-up, while the closure receipt preserves the completed
+operations. Resolve the CI/protection/name issue and run **Create release branch**
+from main with the intended unused branch name. Do not rerun closure or recreate
+the deleted completed release merely to recover next-release setup.
 
 ## Temporary candidates and backup retention
 
@@ -466,8 +483,14 @@ read-only assessment is `python3 .github/scripts/recovery_retention.py assess --
 with `GITHUB_REPOSITORY` and GitHub authentication configured. Omitting
 `--min-days` uses the script's `DEFAULT_MIN_DAYS` value of 30.
 
-Backup eligibility requires a successful full-closure run attempt and its matching
-receipt, or equivalent DEV-219/220 plan, manifest and full-success result artifacts.
+Backup eligibility requires completed full-closure evidence. Schema-1 receipts
+and equivalent DEV-219/220 artifacts still require a successful run attempt.
+A schema-2 receipt can prove core closure even when the completed attempt failed,
+was cancelled or timed out during optional follow-up: retention cross-checks its
+completion marker and exact deleted branch SHAs against the approved plan, the
+promotion receipt, carryover manifest and staging/deletion log. Active attempts
+or missing/mismatched proof remain protected. Historical failed runs without
+that independent proof are not retroactively marked complete.
 Each ref must still have the recorded SHA, and its content must be accounted
 for in current main/staging or verified release evidence. Active and unresolved
 uses are retained. An older completed failed/preparation-only hold is resolved
@@ -582,6 +605,8 @@ names without updating the publisher trigger and repository check settings.
 ## Demo validation and backlog
 
 No outstanding demo implementation tasks remain from the DEV-225/226 backlog.
+DEV-228 addresses the subsequent next-release creation race described below;
+its local regression tests pass, with live rollout validation still pending.
 The following closeout results were verified on 27 November 2026:
 
 | Check | Result/evidence |
@@ -595,6 +620,7 @@ The following closeout results were verified on 27 November 2026:
 | Source publication and retry | [`v1.0.4`](https://github.com/choice-aus/wordpress-demo-website-1/releases/tag/v1.0.4) published at the exact DEV-226 merge SHA; its manual retry returned `already-published` |
 | Standalone release-branch creation | [Run 45934961617](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45934961617) created `release-dev-226` from then-current main |
 | Existing release-branch rejection | [Run 45936672212](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45936672212) deliberately failed with `already exists; no branch was moved` |
+| Chore-branch promotion and cleanup | [Run 45943776763](https://github.com/choice-aus/wordpress-demo-website-1/actions/runs/45943776763) reset staging and deleted `chore/DEV-227`/`release-dev-227`; optional next-release creation then failed because a required check was still running. This exposed the DEV-228 timing/completion-record gap. |
 
 Minor/major label overrides and mismatched-tag rejection remain covered by
 automated tests. Their live publication tests are explicitly deferred, not
@@ -602,12 +628,18 @@ reported as passed. Unknown legacy backup provenance still requires manual
 investigation; no automatic legacy-adoption override is implemented.
 
 All four work-branch prefixes have local automated policy, carryover and cleanup
-coverage. This documentation change uses `chore/DEV-227` to exercise the chore
-prefix live: merge the work branch into staging for UAT and separately into a
-release, then merge the release into main. Its live promotion and closure are
-pending; `fix/*` and `hotfix/*` have not been separately exercised through that
-live flow. Local commit hooks are installed in this WSL checkout; each developer
-checkout needs its own installation.
+coverage. `chore/DEV-227` completed live staging/release promotion and branch
+cleanup. `fix/DEV-228` exercises the fix prefix next; its live promotion/closure
+and the new CI-wait/independent-receipt behavior are pending validation. `hotfix/*`
+has not been separately exercised through the live flow. Local commit hooks are
+installed in this WSL checkout; each developer checkout needs its own installation.
+
+For DEV-228 rollout, promote through the normal cycle, close the latest release
+with an unused `next_release` name, and verify that CI waiting precedes successful
+branch creation. Inspect both receipt/result files and assess backup retention.
+Local tests cover follow-up failure after completed closure without weakening
+proof requirements; exercise a deliberate live failure only with separately
+reviewed disposable inputs. No new workflow parameters are required.
 
 ## After demo approval (outside this demo repository's scope)
 
