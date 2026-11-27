@@ -113,18 +113,49 @@ def read_evidence(repository, artifact):
         require(sum(item.file_size for item in archive.infolist()) <= 32 * 1024 * 1024,
                 "Expanded recovery evidence is unexpectedly large")
         return {name: archive.read(name) for name in (
-            "closure-receipt.json", "release-cycle-plan.json", "carryover-manifest.json",
+            "closure-receipt.json", "promotion-receipt.json", "release-cycle-plan.json", "carryover-manifest.json",
             "release-cycle-result.txt") if name in archive.namelist()}
+
+
+def verify_independent_closure(cycle, files):
+    """Schema 2 proves core closure independently of optional follow-up failure."""
+    plan = json.loads(files["release-cycle-plan.json"])
+    manifest = json.loads(files["carryover-manifest.json"])
+    promotion = json.loads(files["promotion-receipt.json"])
+    require(cycle.get("closure_complete") is True, "Closure is not complete")
+    require(isinstance(cycle.get("release_sha"), str) and SHA.fullmatch(cycle["release_sha"]),
+            "Closure release revision is missing")
+    deleted = cycle.get("deleted_branches")
+    require(isinstance(deleted, dict) and deleted == plan.get("cleanup")
+            and deleted.get(cycle["release"]) == cycle["release_sha"]
+            and all(isinstance(sha, str) and SHA.fullmatch(sha) for sha in deleted.values())
+            and not ({"main", "staging"} & set(deleted)), "Closure deletion proof differs from plan")
+    require(cycle["release_sha"] == plan.get("release_sha"), "Closure release SHA differs from plan")
+    require(type(cycle.get("candidate_removed")) is bool, "Missing candidate disposition")
+    require(promotion.get("schema") == 1 and all(promotion.get(key) == cycle.get(key) for key in (
+        "repository", "release", "main", "original_staging", "candidate", "candidate_sha", "backup",
+        "backup_sha", "candidate_removed", "run_id", "run_attempt")), "Promotion receipt differs from closure")
+    require(manifest.get("candidate") == cycle["candidate"]
+            and manifest.get("candidate_sha") == cycle["candidate_sha"]
+            and manifest.get("failed") == [], "Carryover proof differs from closure")
+    output = files["release-cycle-result.txt"].decode()
+    deleted_lines = [line.removeprefix("Deleted verified branches: ").split(", ")
+                     for line in output.splitlines() if line.startswith("Deleted verified branches: ")]
+    require(deleted_lines and set(deleted_lines[-1]) == set(deleted)
+            and f"Staging promoted to verified candidate {cycle['candidate']} at {cycle['candidate_sha']}" in output
+            and "Preparation only:" not in output, "No matching completed closure operations in log")
 
 
 def decode_cycle(repository, run_id, attempt, files, completed_at):
     """Accept receipts or the equivalent full-success evidence from DEV-219/220."""
     if "closure-receipt.json" in files:
         cycle = json.loads(files["closure-receipt.json"])
-        require(cycle.get("schema") == 1, "Unknown closure receipt schema")
+        require(cycle.get("schema") in (1, 2), "Unknown closure receipt schema")
         require(str(cycle["run_id"]) == str(run_id) and str(cycle["run_attempt"]) == str(attempt),
                 "Closure receipt run mismatch")
-        source = "closure-receipt"
+        source = "closure-receipt-v2" if cycle["schema"] == 2 else "closure-receipt"
+        if cycle["schema"] == 2:
+            verify_independent_closure(cycle, files)
     else:
         plan = json.loads(files["release-cycle-plan.json"])
         manifest = json.loads(files["carryover-manifest.json"])
@@ -231,8 +262,13 @@ def completed_cycles(repository):
                 related.add(json.loads(files["carryover-manifest.json"])["candidate"])
             attempt_info = github("api", f"repos/{repository}/actions/runs/{run_id}/attempts/{attempt}")
             try:
-                require(attempt_info["conclusion"] == "success", "Run attempt did not succeed")
-                cycles.append(decode_cycle(repository, run_id, attempt, files, artifact["created_at"]))
+                decoded = decode_cycle(repository, run_id, attempt, files, artifact["created_at"])
+                independent = (decoded["source"] == "closure-receipt-v2"
+                               and attempt_info.get("status") == "completed"
+                               and attempt_info.get("conclusion") in ("success", "failure", "cancelled", "timed_out"))
+                require(attempt_info["conclusion"] == "success" or independent,
+                        "No successful attempt or independent completed closure proof")
+                cycles.append(decoded)
             except (RuntimeError, KeyError, ValueError):
                 protected.update(related)
                 for branch in related:

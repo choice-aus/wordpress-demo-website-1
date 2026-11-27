@@ -11,6 +11,14 @@ import create_release_branch as creation
 
 
 class ReleaseBranchCreationTests(unittest.TestCase):
+    def setUp(self):
+        waiter = patch.object(creation, 'wait_for_ci')
+        self.wait = waiter.start()
+        self.addCleanup(waiter.stop)
+        reader = patch.object(creation, 'push_ci_runs', return_value=[])
+        self.runs = reader.start()
+        self.addCleanup(reader.stop)
+
     def test_creates_only_requested_branch_at_exact_main_sha(self):
         sha = 'a' * 40
         with patch.object(creation, 'matching_refs', return_value=[]), \
@@ -66,6 +74,56 @@ class ReleaseBranchCreationTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 creation.create_release_branch('choice/repo', 'release-dev-224')
             self.assertEqual(api.call_count, 1)
+
+    def test_expected_main_mismatch_never_waits_or_writes(self):
+        with patch.object(creation, 'matching_refs', return_value=[]), \
+             patch.object(creation, 'remote_sha', return_value='b' * 40), \
+             patch.object(creation, 'github') as api:
+            with self.assertRaisesRegex(RuntimeError, 'approved release-cycle SHA'):
+                creation.create_release_branch('choice/repo', 'release-next', expected_main='a' * 40)
+        self.wait.assert_not_called()
+        api.assert_not_called()
+
+    def test_wait_failure_or_changed_guard_never_posts_a_branch(self):
+        for failure in ('Timed out waiting for CI', 'Backup changed after cleanup'):
+            self.wait.side_effect = RuntimeError(failure)
+            with self.subTest(failure=failure), patch.object(creation, 'matching_refs', return_value=[]), \
+                 patch.object(creation, 'remote_sha', return_value='a' * 40), \
+                 patch.object(creation, 'github') as api:
+                with self.assertRaisesRegex(RuntimeError, failure):
+                    creation.create_release_branch('choice/repo', 'release-next')
+            api.assert_not_called()
+
+    def test_concurrently_created_branch_during_wait_is_never_adopted(self):
+        with patch.object(creation, 'matching_refs', side_effect=[[], [dict(ref='refs/heads/release-next')]]), \
+             patch.object(creation, 'remote_sha', return_value='a' * 40), \
+             patch.object(creation, 'github') as api:
+            with self.assertRaisesRegex(RuntimeError, 'already exists'):
+                creation.create_release_branch('choice/repo', 'release-next')
+        api.assert_not_called()
+
+    def test_late_visible_ci_allows_one_guarded_create_only_retry(self):
+        error = subprocess.CalledProcessError(1, ['gh', 'api'], stderr='Reference update failed (HTTP 422)')
+        self.runs.return_value = [dict(status='in_progress')]
+        response = dict(ref='refs/heads/release-next', object=dict(sha='a' * 40))
+        with patch.object(creation, 'matching_refs', return_value=[]), \
+             patch.object(creation, 'remote_sha', return_value='a' * 40), \
+             patch.object(creation, 'github', side_effect=[error, response]) as api:
+            creation.create_release_branch('choice/repo', 'release-next')
+        self.assertEqual(self.wait.call_count, 2)
+        self.assertEqual(api.call_count, 2)
+        self.assertTrue(all('POST' in call.args for call in api.call_args_list))
+
+    def test_422_without_active_ci_or_second_rejection_is_not_retried_again(self):
+        error = subprocess.CalledProcessError(1, ['gh', 'api'], stderr='Reference update failed (HTTP 422)')
+        for active, expected in (([], 1), ([dict(status='queued')], 2)):
+            self.runs.return_value = active
+            with self.subTest(active=active), patch.object(creation, 'matching_refs', return_value=[]), \
+                 patch.object(creation, 'remote_sha', return_value='a' * 40), \
+                 patch.object(creation, 'github', side_effect=error) as api:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    creation.create_release_branch('choice/repo', 'release-next')
+                self.assertEqual(api.call_count, expected)
 
 
 if __name__ == '__main__':

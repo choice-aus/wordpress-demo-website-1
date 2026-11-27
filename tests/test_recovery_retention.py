@@ -207,7 +207,8 @@ class RetentionTests(unittest.TestCase):
 
     def shared_hold_case(self, hold_status='completed', hold_conclusion='success',
                          hold_updated='2026-11-01T00:00:00Z', mutate_hold=None,
-                         mutate_success=None, extra_hold=False):
+                         mutate_success=None, extra_hold=False,
+                         success_status='completed', success_conclusion='success'):
         held = self.cycle_files(100, preparation_only=True)
         success = self.cycle_files(200)
         if mutate_hold:
@@ -232,7 +233,7 @@ class RetentionTests(unittest.TestCase):
             run_id = int(args[1].split('/')[-3])
             if run_id == 300:
                 return dict(status='waiting', conclusion=None, updated_at=hold_updated)
-            return (dict(status='completed', conclusion='success', updated_at='2026-11-02T00:01:00Z')
+            return (dict(status=success_status, conclusion=success_conclusion, updated_at='2026-11-02T00:01:00Z')
                     if run_id == 200 else dict(status=hold_status, conclusion=hold_conclusion,
                                                updated_at=hold_updated))
 
@@ -331,6 +332,78 @@ class RetentionTests(unittest.TestCase):
         cycles, protected = self.shared_hold_case(mutate_success=corrupt)
         self.assertEqual(cycles, [])
         self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
+    def independent_closure_files(self, files):
+        plan = json.loads(files['release-cycle-plan.json'])
+        manifest = json.loads(files['carryover-manifest.json'])
+        run_id, attempt = manifest['candidate'].removeprefix('staging-next-cycle-').split('-')
+        core = dict(repository='choice/repo', release=plan['release'], main=plan['main'],
+                    original_staging=plan['staging'], candidate=manifest['candidate'],
+                    candidate_sha=manifest['candidate_sha'], backup_sha=plan['staging'],
+                    backup='backup/staging-before-reset-' + plan['staging'][:12],
+                    candidate_removed=True, run_id=run_id, run_attempt=attempt)
+        files['promotion-receipt.json'] = json.dumps(dict(core, schema=1)).encode()
+        files['closure-receipt.json'] = json.dumps(dict(
+            core, schema=2, closure_complete=True, release_sha=plan['release_sha'],
+            deleted_branches=plan['cleanup'], next_release_requested='release-next')).encode()
+
+    def test_verified_v2_core_closure_survives_failed_cancelled_or_timed_out_followup(self):
+        for conclusion in ('failure', 'cancelled', 'timed_out', 'success'):
+            with self.subTest(conclusion=conclusion):
+                cycles, protected = self.shared_hold_case(mutate_success=self.independent_closure_files,
+                                                          success_conclusion=conclusion)
+                self.assertEqual(len(cycles), 1)
+                self.assertEqual(cycles[0]['source'], 'closure-receipt-v2')
+                self.assertNotIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
+    def test_incomplete_or_unknown_attempt_cannot_supply_independent_closure(self):
+        for status, conclusion in (('in_progress', None), ('waiting', None), ('completed', 'skipped')):
+            with self.subTest(status=status, conclusion=conclusion):
+                cycles, protected = self.shared_hold_case(mutate_success=self.independent_closure_files,
+                                                          success_status=status, success_conclusion=conclusion)
+                self.assertEqual(cycles, [])
+                self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
+    def test_schema_one_receipt_does_not_reclassify_historical_failed_run(self):
+        def legacy(files):
+            self.independent_closure_files(files)
+            receipt = json.loads(files['closure-receipt.json'])
+            receipt['schema'] = 1
+            files['closure-receipt.json'] = json.dumps(receipt).encode()
+        cycles, protected = self.shared_hold_case(mutate_success=legacy, success_conclusion='failure')
+        self.assertEqual(cycles, [])
+        self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
+    def test_partial_or_mismatched_v2_evidence_never_authorizes_retirement(self):
+        mutations = (
+            lambda files: files.pop('promotion-receipt.json'),
+            lambda files: files.pop('carryover-manifest.json'),
+            lambda files: files.pop('release-cycle-plan.json'),
+            lambda files: files.pop('release-cycle-result.txt'),
+            lambda files: files.update({'release-cycle-result.txt': b'Preparation only:\n'}),
+        )
+        for key, field, value in (
+                ('closure-receipt.json', 'closure_complete', False),
+                ('closure-receipt.json', 'deleted_branches', {}),
+                ('closure-receipt.json', 'release_sha', 'e' * 40),
+                ('closure-receipt.json', 'run_attempt', '2'),
+                ('promotion-receipt.json', 'candidate_sha', 'e' * 40),
+                ('promotion-receipt.json', 'candidate_removed', False),
+                ('carryover-manifest.json', 'failed', [dict(branch='feature/unresolved')])):
+            def change(files, key=key, field=field, value=value):
+                data = json.loads(files[key])
+                data[field] = value
+                files[key] = json.dumps(data).encode()
+            mutations += (change,)
+        for mutation in mutations:
+            def corrupt(files):
+                self.independent_closure_files(files)
+                mutation(files)
+            with self.subTest(mutation=mutation):
+                cycles, protected = self.shared_hold_case(mutate_success=corrupt, success_conclusion='failure')
+                self.assertEqual(cycles, [])
+                # Even missing the plan, the original held use remains protected.
+                self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
 
 
 class LeasedRetentionIntegrationTests(unittest.TestCase):
