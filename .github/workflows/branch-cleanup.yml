@@ -1,4 +1,4 @@
-name: Branch cleanup
+name: Close release cycle
 
 on:
   workflow_dispatch:
@@ -55,7 +55,7 @@ permissions:
   pull-requests: read
   issues: read
 
-# Shared by the legacy preparation entry point through workflow_call.
+# Serialize release closure and recovery pruning across entry points.
 concurrency:
   group: close-release-cycle
   cancel-in-progress: false

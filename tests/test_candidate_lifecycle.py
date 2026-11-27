@@ -108,14 +108,46 @@ class CandidateInventoryTests(unittest.TestCase):
         refs = {self.candidate: 'a' * 40, 'staging-next-cycle-123-2': 'b' * 40,
                 'staging-next-cycle': 'c' * 40}
         root_run = dict(id=123, run_attempt=2, status='in_progress', conclusion=None)
-        with patch.object(retention, 'paginated', side_effect=[[root_run], []]), \
+        with patch.object(retention, 'paginated', return_value=[root_run]) as history, \
              patch.object(retention, 'get_open_prs', return_value=[]), \
              patch.object(retention, 'github', return_value=dict(status='completed', conclusion='failure')) as api:
             states = retention.candidate_run_states('choice/repo', refs)
         self.assertEqual(states[self.candidate]['status'], 'completed')
         self.assertEqual(states['staging-next-cycle-123-2']['status'], 'in_progress')
         self.assertTrue(states['staging-next-cycle']['active_preparations'])
+        history.assert_called_once_with('repos/choice/repo/actions/runs')
         api.assert_called_once_with('api', 'repos/choice/repo/actions/runs/123/attempts/1')
+
+    def test_retired_preparation_workflow_history_keeps_active_and_legacy_candidates(self):
+        runs = [dict(id=123, run_attempt=1, status='waiting', conclusion=None,
+                     path='.github/workflows/prepare-next-uat-cycle.yml'),
+                dict(id=456, run_attempt=1, status='in_progress', conclusion=None,
+                     path='.github/workflows/ci.yml')]
+        with patch.object(retention, 'paginated', return_value=runs) as history, \
+             patch.object(retention, 'get_open_prs', return_value=[]):
+            states = retention.candidate_run_states('choice/repo', {
+                self.candidate: 'a' * 40, 'staging-next-cycle': 'b' * 40})
+        history.assert_called_once_with('repos/choice/repo/actions/runs')
+        self.assertEqual(states[self.candidate]['status'], 'waiting')
+        self.assertFalse(states[self.candidate]['legacy'])
+        self.assertTrue(states['staging-next-cycle']['active_preparations'])
+
+    def test_unrelated_active_ci_does_not_hold_legacy_candidate(self):
+        runs = [dict(id=456, run_attempt=1, status='in_progress', conclusion=None,
+                     path='.github/workflows/ci.yml')]
+        with patch.object(retention, 'paginated', return_value=runs), \
+             patch.object(retention, 'get_open_prs', return_value=[]):
+            states = retention.candidate_run_states('choice/repo', {'staging-next-cycle': 'a' * 40})
+        self.assertFalse(states['staging-next-cycle']['active_preparations'])
+
+    def test_completed_retired_workflow_candidate_remains_identifiable(self):
+        runs = [dict(id=123, run_attempt=1, status='completed', conclusion='success',
+                     path='.github/workflows/prepare-next-uat-cycle.yml@main')]
+        with patch.object(retention, 'paginated', return_value=runs), \
+             patch.object(retention, 'get_open_prs', return_value=[]):
+            states = retention.candidate_run_states('choice/repo', {self.candidate: 'a' * 40})
+        self.assertFalse(states[self.candidate]['legacy'])
+        self.assertEqual(states[self.candidate]['status'], 'completed')
 
     def test_summary_leads_with_counts_and_separates_candidate_and_backup_reasons(self):
         plan, _ = self.plan({self.candidate: dict(legacy=False, status='completed')})
