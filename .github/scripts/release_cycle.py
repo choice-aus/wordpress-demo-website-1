@@ -184,32 +184,51 @@ def promotion_receipt(plan, candidate, candidate_sha, backup, candidate_removed)
 
 
 def finish_cycle(plan, candidate, candidate_sha, backup, candidate_removed=False):
-    """Only after promotion and cleanup succeed, perform reviewed follow-up work."""
+    """Record completed closure before attempting optional next-release setup."""
     repository = plan["repository"]
     options = plan.get("options", {})
-    require(get_latest_release(repository) == plan["release"], "Latest release changed after cleanup")
-    require(remote_sha(repository, "main") == plan["main"], "Main changed after cleanup")
-    require(remote_sha(repository, "staging") == candidate_sha, "Staging changed after cleanup")
-    require(remote_sha(repository, backup) == plan["staging"], "Backup changed after cleanup")
-    if not candidate_removed:
-        require(remote_sha(repository, candidate) == candidate_sha, "Candidate changed after cleanup")
-    approval_environment(repository)
-    verify_remote_repository(repository)
+
+    def check_closure():
+        require(get_latest_release(repository) == plan["release"], "Latest release changed after cleanup")
+        require(remote_sha(repository, "main") == plan["main"], "Main changed after cleanup")
+        require(remote_sha(repository, "staging") == candidate_sha, "Staging changed after cleanup")
+        require(remote_sha(repository, backup) == plan["staging"], "Backup changed after cleanup")
+        if not candidate_removed:
+            require(remote_sha(repository, candidate) == candidate_sha, "Candidate changed after cleanup")
+        approval_environment(repository)
+        verify_remote_repository(repository)
+
+    check_closure()
     next_release = options.get("next_release", "")
-    if next_release:
-        validate_next_release(next_release, plan["release"])
-        require(not matching_refs(repository, next_release), "Next release branch already exists")
-        # POST is create-only: a concurrent creation rejects this operation.
-        github("api", f"repos/{repository}/git/refs", "--method", "POST",
-               "-f", f"ref=refs/heads/{next_release}", "-f", f"sha={plan['main']}")
-        print(f"Created next release {next_release} from main at {plan['main']}")
-    receipt = dict(schema=1, repository=repository, release=plan["release"], main=plan["main"],
+    receipt = dict(schema=2, closure_complete=True, repository=repository,
+                   release=plan["release"], release_sha=plan["release_sha"], main=plan["main"],
                    original_staging=plan["staging"], candidate=candidate, candidate_sha=candidate_sha,
                    backup=backup, backup_sha=plan["staging"], candidate_removed=candidate_removed,
-                   next_release=next_release, run_id=os.environ["GITHUB_RUN_ID"],
+                   deleted_branches=plan["cleanup"], next_release_requested=next_release,
+                   run_id=os.environ["GITHUB_RUN_ID"],
                    run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
                    completed_at=datetime.now(timezone.utc).isoformat())
     Path("closure-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    print('Release closure completed and recorded; optional next-release setup is separate', flush=True)
+    result = dict(schema=1, repository=repository, source_sha=plan["main"], branch=next_release,
+                  status="pending" if next_release else "not-requested")
+    Path("next-release-result.json").write_text(json.dumps(result, indent=2) + "\n")
+    if next_release:
+        # Import here because the standalone entry point already imports the
+        # release-cycle guard helpers. Both entry points use the same creator.
+        from create_release_branch import create_release_branch
+        try:
+            validate_next_release(next_release, plan["release"])
+            create_release_branch(repository, next_release, expected_main=plan["main"], revalidate=check_closure)
+        except (RuntimeError, subprocess.CalledProcessError) as error:
+            result.update(status="failed", error=str(error))
+            Path("next-release-result.json").write_text(json.dumps(result, indent=2) + "\n")
+            raise RuntimeError(f"Release closure completed; next-release setup failed: {error}. "
+                               f"After resolving the cause, run Create release branch from main for "
+                               f"{next_release}. Do not rerun cleanup or recreate {plan['release']}.") from error
+        result["status"] = "created"
+        Path("next-release-result.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(f"Created next release {next_release} from main at {plan['main']}")
 
 
 def execute(plan, preparation_only=True):
