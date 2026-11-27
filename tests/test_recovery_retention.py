@@ -191,6 +191,147 @@ class RetentionTests(unittest.TestCase):
         self.assertIn('staging-next-cycle-123-1', protected)
         self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
 
+    def cycle_files(self, run_id, preparation_only=False):
+        files = self.legacy_files()
+        plan = json.loads(files['release-cycle-plan.json'])
+        plan['release_sha'] = 'd' * 40
+        files['release-cycle-plan.json'] = json.dumps(plan).encode()
+        manifest = json.loads(files['carryover-manifest.json'])
+        manifest['candidate'] = f'staging-next-cycle-{run_id}-1'
+        files['carryover-manifest.json'] = json.dumps(manifest).encode()
+        output = files['release-cycle-result.txt'].decode().replace('123-1', str(run_id) + '-1')
+        if preparation_only:
+            output = 'Preparation only: staging reset and branch deletion disabled\n'
+        files['release-cycle-result.txt'] = output.encode()
+        return files
+
+    def shared_hold_case(self, hold_status='completed', hold_conclusion='success',
+                         hold_updated='2026-11-01T00:00:00Z', mutate_hold=None,
+                         mutate_success=None, extra_hold=False):
+        held = self.cycle_files(100, preparation_only=True)
+        success = self.cycle_files(200)
+        if mutate_hold:
+            mutate_hold(held)
+        if mutate_success:
+            mutate_success(success)
+        runs = [dict(id=100), dict(id=200)]
+        files = {100: held, 200: success}
+        if extra_hold:
+            runs.append(dict(id=300))
+            files[300] = self.cycle_files(300, preparation_only=True)
+
+        def pages(endpoint):
+            if endpoint.endswith('/runs'):
+                return runs
+            run_id = int(endpoint.split('/')[-2])
+            return [dict(name='release-cycle-evidence-1', expired=False, id=run_id,
+                         created_at=('2026-11-02T00:00:00Z' if run_id == 200 else hold_updated),
+                         size_in_bytes=100)]
+
+        def attempt(*args):
+            run_id = int(args[1].split('/')[-3])
+            if run_id == 300:
+                return dict(status='waiting', conclusion=None, updated_at=hold_updated)
+            return (dict(status='completed', conclusion='success', updated_at='2026-11-02T00:01:00Z')
+                    if run_id == 200 else dict(status=hold_status, conclusion=hold_conclusion,
+                                               updated_at=hold_updated))
+
+        with patch.object(retention, 'paginated', side_effect=pages), \
+             patch.object(retention, 'read_evidence', side_effect=lambda repo, artifact: files[artifact['id']]), \
+             patch.object(retention, 'github', side_effect=attempt):
+            return retention.completed_cycles('choice/repo')
+
+    def test_later_verified_closure_resolves_preparation_only_or_failed_backup_hold(self):
+        for conclusion in ('success', 'failure', 'cancelled'):
+            with self.subTest(conclusion=conclusion):
+                cycles, protected = self.shared_hold_case(hold_conclusion=conclusion)
+                self.assertEqual(len(cycles), 1)
+                self.assertNotIn('backup/staging-before-reset-' + 'b' * 12, protected)
+                self.assertIn('staging-next-cycle-100-1', protected)
+
+    def test_active_later_undated_or_naive_dated_use_keeps_shared_backup(self):
+        cases = (dict(hold_status='in_progress', hold_conclusion=None),
+                 dict(hold_status='waiting', hold_conclusion=None),
+                 dict(hold_updated='2026-11-03T00:00:00Z'),
+                 dict(hold_updated='2026-11-02T00:00:00Z'),
+                 dict(hold_updated=None), dict(hold_updated='2026-11-01T00:00:00'))
+        for case in cases:
+            with self.subTest(case=case):
+                _, protected = self.shared_hold_case(**case)
+                self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
+    def test_hold_requires_exact_release_revision_backup_sha_and_repository(self):
+        def change_plan(field, value):
+            def mutate(files):
+                plan = json.loads(files['release-cycle-plan.json'])
+                plan[field] = value
+                files['release-cycle-plan.json'] = json.dumps(plan).encode()
+            return mutate
+        for field, value in (('release', 'release-other'), ('release_sha', 'e' * 40),
+                             ('staging', 'b' * 12 + 'e' * 28), ('repository', 'other/repo'),
+                             ('release_sha', 'unknown')):
+            with self.subTest(field=field, value=value):
+                _, protected = self.shared_hold_case(mutate_hold=change_plan(field, value))
+                self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
+    def test_any_unresolved_shared_use_keeps_backup(self):
+        # A completed retry for the original hold is not proof for another active use.
+        cycles, protected = self.shared_hold_case(extra_hold=True)
+        self.assertEqual(len(cycles), 1)
+        self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
+    def test_lifting_hold_still_keeps_latest_three_cycles(self):
+        cycles, protected = self.shared_hold_case()
+        cycle = cycles[0]
+        refs = dict(main='a' * 40, staging='a' * 40, **{cycle['backup']: cycle['backup_sha']})
+        # A resolved hold does not itself authorize deletion of a recent cycle.
+        plan = retention.build_plan('choice/repo', refs, cycles, protected, self.now.isoformat(),
+                                    lambda sha: True, min_days=1, scope='backups')
+        self.assertEqual(plan['cleanup'], {})
+        self.assertIn('latest 3', plan['assessments'][0]['reason'])
+
+    def test_resolved_old_backup_only_deleted_outside_retention_with_exact_sha_and_content(self):
+        cycles, protected = self.shared_hold_case()
+        old = cycles[0]
+        for number in range(3, 6):
+            cycles.append(dict(old, run_id=str(number + 200),
+                               backup='backup/staging-before-reset-' + str(number) * 12,
+                               backup_sha=str(number) * 40,
+                               candidate=f'staging-next-cycle-{number + 200}-1',
+                               completed_at=f'2026-11-0{number}T00:00:00Z'))
+        refs = dict(main='a' * 40, staging='a' * 40, **{old['backup']: old['backup_sha']})
+        for days, content, changed in ((1, True, False), (30, True, False),
+                                       (1, False, False), (1, True, True)):
+            current_refs = dict(refs)
+            if changed:
+                current_refs[old['backup']] = 'f' * 40
+            plan = retention.build_plan('choice/repo', current_refs, cycles, protected,
+                                        self.now.isoformat(), lambda sha: content,
+                                        min_days=days, scope='backups')
+            with self.subTest(days=days, content=content, changed=changed):
+                self.assertEqual(old['backup'] in plan['cleanup'], days == 1 and content and not changed)
+
+    def test_legacy_success_without_release_revision_does_not_resolve_hold(self):
+        def legacy(files):
+            plan = json.loads(files['release-cycle-plan.json'])
+            del plan['release_sha']
+            files['release-cycle-plan.json'] = json.dumps(plan).encode()
+        cycles, protected = self.shared_hold_case(mutate_success=legacy)
+        self.assertEqual(len(cycles), 1)
+        self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
+    def test_receipt_plan_disagreement_cannot_resolve_holds(self):
+        def corrupt(files):
+            plan = json.loads(files['release-cycle-plan.json'])
+            files['closure-receipt.json'] = json.dumps(dict(
+                schema=1, repository='choice/repo', run_id='200', run_attempt='1',
+                release='release-other', main=plan['main'], original_staging=plan['staging'],
+                backup_sha=plan['staging'], backup='backup/staging-before-reset-' + 'b' * 12,
+                candidate='staging-next-cycle-200-1', candidate_sha='a' * 40)).encode()
+        cycles, protected = self.shared_hold_case(mutate_success=corrupt)
+        self.assertEqual(cycles, [])
+        self.assertIn('backup/staging-before-reset-' + 'b' * 12, protected)
+
 
 class LeasedRetentionIntegrationTests(unittest.TestCase):
     def setUp(self):
