@@ -1,4 +1,4 @@
-name: Recovery branch housekeeping
+name: Clean up recovery branches
 
 on:
   workflow_dispatch:

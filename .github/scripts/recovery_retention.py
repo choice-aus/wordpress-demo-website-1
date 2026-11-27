@@ -43,10 +43,16 @@ def candidate_run_states(repository, refs):
     """Use run metadata, not expiring artifacts, to protect active preparations."""
     if not any(ref_kind(branch) == "candidate" for branch in refs):
         return {}
-    runs = {}
-    for workflow in ("branch-cleanup.yml", "prepare-next-uat-cycle.yml"):
-        for run in paginated(f"repos/{repository}/actions/workflows/{workflow}/runs"):
-            runs[str(run["id"])] = run
+    preparation_paths = {".github/workflows/branch-cleanup.yml",
+                         ".github/workflows/prepare-next-uat-cycle.yml"}
+    candidate_ids = {match[1] for branch in refs
+                     if (match := CANDIDATE_NAME.fullmatch(branch))}
+    # Repository-wide history retains runs of retired workflow files. Looking up
+    # the deleted preparation shortcut by filename can instead return HTTP 404.
+    # Also keep exact candidate run IDs even if their workflow path is unknown.
+    runs = {str(run["id"]): run for run in paginated(f"repos/{repository}/actions/runs")
+            if (run.get("path") or "").split("@")[0] in preparation_paths
+            or str(run["id"]) in candidate_ids}
     active = any(run["status"] != "completed" for run in runs.values())
     open_prs = {}
     for pr in get_open_prs(repository):
@@ -147,15 +153,65 @@ def decode_cycle(repository, run_id, attempt, files, completed_at):
             "Unexpected candidate name")
     require(cycle["backup"] == f"backup/staging-before-reset-{cycle['original_staging'][:12]}",
             "Unexpected backup name")
-    return dict(run_id=str(run_id), run_attempt=str(attempt), source=source,
+    result = dict(run_id=str(run_id), run_attempt=str(attempt), source=source,
                 completed_at=completed_at, backup=cycle["backup"], backup_sha=cycle["backup_sha"],
                 candidate=cycle["candidate"], candidate_sha=cycle["candidate_sha"])
+    # A later closure can resolve an older hold only with the matching reviewed
+    # release revision. Older receipts without the plan remain valid retention
+    # evidence, but cannot supply this stronger supersession proof.
+    if "release-cycle-plan.json" in files:
+        plan = json.loads(files["release-cycle-plan.json"])
+        require(plan.get("repository") == repository and plan.get("prepare") is True
+                and plan.get("release") == cycle["release"]
+                and plan.get("staging") == cycle["backup_sha"]
+                and plan.get("main") == cycle["main"], "Closure receipt and plan disagree")
+        if isinstance(plan.get("release_sha"), str) and SHA.fullmatch(plan["release_sha"]):
+            result.update(release=plan["release"], release_sha=plan["release_sha"])
+    return result
+
+
+def evidence_time(value):
+    """Unknown/naive timestamps cannot establish that a hold has been resolved."""
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return stamp if stamp.tzinfo is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def backup_hold(repository, branch, plan, attempt_info):
+    """Keep enough identity and timing to distinguish superseded and active use."""
+    if (plan.get("repository") != repository or plan.get("prepare") is not True
+            or not isinstance(plan.get("staging"), str) or not SHA.fullmatch(plan["staging"])
+            or not isinstance(plan.get("release_sha"), str) or not SHA.fullmatch(plan["release_sha"])
+            or not isinstance(plan.get("release"), str)
+            or not plan["release"].startswith("release-")
+            or branch != f"backup/staging-before-reset-{plan['staging'][:12]}"):
+        return None
+    return dict(backup=branch, backup_sha=plan["staging"], release=plan["release"],
+                release_sha=plan["release_sha"], status=attempt_info.get("status"),
+                finished_at=attempt_info.get("updated_at"))
+
+
+def hold_resolved(hold, cycles):
+    if not hold or hold["status"] != "completed":
+        return False
+    ended = evidence_time(hold["finished_at"])
+    if ended is None:
+        return False
+    for cycle in cycles:
+        completed = evidence_time(cycle["completed_at"])
+        if (completed is not None and completed > ended
+                and all(cycle.get(key) == hold[key]
+                        for key in ("backup", "backup_sha", "release", "release_sha"))):
+            return True
+    return False
 
 
 def completed_cycles(repository):
     runs = {run["id"]: run for run in paginated(
         f"repos/{repository}/actions/workflows/branch-cleanup.yml/runs")}
-    cycles, protected = [], set()
+    cycles, protected, backup_holds = [], set(), {}
     for run_id in sorted(runs):
         artifacts = paginated(f"repos/{repository}/actions/runs/{run_id}/artifacts")
         for artifact in artifacts:
@@ -164,9 +220,9 @@ def completed_cycles(repository):
                 continue
             attempt = match[1]
             files = read_evidence(repository, artifact)
-            # Failure and preparation-only evidence can share a backup ref
-            # with a successful cycle. Protect it as well as their candidate.
+            # Retain each unresolved use, not just whether *any* run ever failed.
             related = {f"staging-next-cycle-{run_id}-{attempt}"}
+            plan = {}
             if "release-cycle-plan.json" in files:
                 plan = json.loads(files["release-cycle-plan.json"])
                 if plan.get("prepare") and plan.get("staging") and SHA.fullmatch(plan["staging"]):
@@ -179,6 +235,16 @@ def completed_cycles(repository):
                 cycles.append(decode_cycle(repository, run_id, attempt, files, artifact["created_at"]))
             except (RuntimeError, KeyError, ValueError):
                 protected.update(related)
+                for branch in related:
+                    if ref_kind(branch) == "backup":
+                        backup_holds.setdefault(branch, []).append(
+                            backup_hold(repository, branch, plan, attempt_info))
+    # Every use must be superseded; one active, newer, unrelated or unknown use
+    # keeps the shared backup. This only lifts a hold: normal cycle/age retention,
+    # exact SHA checks, content proof and post-approval revalidation still apply.
+    for branch, holds in backup_holds.items():
+        if all(hold_resolved(hold, cycles) for hold in holds):
+            protected.discard(branch)
     return cycles, protected
 
 
